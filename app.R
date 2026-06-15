@@ -45,12 +45,17 @@ read_rss_mb <- function() {
 
 mem_snapshot <- function() {
     g <- gc(verbose = FALSE)
-    # gc() returns a matrix whose colnames are not unique; positions are stable:
-    # col 2 = current Mb used, col 7 = peak Mb used.
+    # gc() returns a matrix with non-unique column names ("(Mb)" appears
+    # multiple times). Column count differs by OS: macOS includes a
+    # "limit (Mb)" column that Linux omits. Locate Mb columns by name -
+    # first is current usage, last is peak.
+    mb_idx <- which(colnames(g) == "(Mb)")
+    used_mb <- if (length(mb_idx)) sum(g[, mb_idx[1]]) else NA_real_
+    peak_mb <- if (length(mb_idx)) sum(g[, mb_idx[length(mb_idx)]]) else NA_real_
     list(
         rss_mb    = read_rss_mb(),
-        r_used_mb = sum(g[, 2]),
-        r_peak_mb = sum(g[, 7])
+        r_used_mb = used_mb,
+        r_peak_mb = peak_mb
     )
 }
 
