@@ -808,7 +808,7 @@ server <- function(input, output, session) {
             left_join(MATCHED_STAGES %>%
                           mutate(stage = factor(prot_stage, levels = STAGES)),
                       by = "stage") %>%
-            mutate(modality = "Protein (log2 abundance)") %>%
+            mutate(modality = "Protein") %>%
             select(Geneid, pair_label, value, modality)
 
         # RNA: log10(TPM+1), restrict to matched RNA stages
@@ -819,11 +819,13 @@ server <- function(input, output, session) {
             left_join(MATCHED_STAGES %>%
                           mutate(stage = factor(rna_stage, levels = DEV_STAGES_RNA)),
                       by = "stage") %>%
-            mutate(modality = "RNA (log10 TPM+1)") %>%
+            mutate(modality = "RNA") %>%
             select(Geneid, pair_label, value, modality)
 
         both <- bind_rows(prot, rna) %>%
-            mutate(pair_label = factor(pair_label, levels = MATCHED_STAGES$pair_label)) %>%
+            mutate(pair_label = factor(pair_label, levels = MATCHED_STAGES$pair_label),
+                   modality = factor(modality, levels = c("Protein", "RNA")),
+                   series = paste0(Geneid, " — ", modality)) %>%
             group_by(Geneid, modality) %>%
             mutate(z = if (sd(value, na.rm = TRUE) > 0)
                        (value - mean(value, na.rm = TRUE)) / sd(value, na.rm = TRUE)
@@ -832,24 +834,39 @@ server <- function(input, output, session) {
         both
     })
 
+    # Facet labeller so heatmap headers show units even though data uses
+    # short modality names ("Protein", "RNA") to keep the line-plot legend clean.
+    modality_labeller <- as_labeller(c(
+        "Protein" = "Protein (log2 abundance)",
+        "RNA"     = "RNA (log10 TPM+1)"
+    ))
+
     output$plot_combined <- renderPlotly({
         df <- combined_data()
         validate(need(nrow(df) > 0,
                       "No matched-stage data for selection. ",
                       "Check that the gene exists in both modalities."))
+        # One legend entry per (gene, modality) pair, with explicit label.
+        # Shape encodes modality (circle = Protein, triangle = RNA);
+        # linetype reinforces visually (solid vs longdash).
         p <- ggplot(df, aes(x = pair_label, y = z,
-                            group = interaction(Geneid, modality),
-                            color = Geneid, linetype = modality,
+                            group = series, color = series,
+                            linetype = modality, shape = modality,
                             text = paste0("gene: ", Geneid,
                                           "<br>modality: ", modality,
                                           "<br>stage: ", pair_label,
                                           "<br>z-score: ", round(z, 2),
                                           "<br>raw value: ", round(value, 2)))) +
-            geom_line(linewidth = ln_width()) + geom_point(size = pt_size(), shape = pt_shape()) +
+            geom_line(linewidth = ln_width()) +
+            geom_point(size = pt_size()) +
+            scale_linetype_manual(values = c(Protein = "solid", RNA = "longdash"),
+                                  guide = "none") +
+            scale_shape_manual(values = c(Protein = 16, RNA = 17),
+                               guide = "none") +
             theme_minimal(base_size = 12) +
             theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
             labs(x = NULL, y = "Z-score (within gene, within modality)",
-                 color = NULL, linetype = NULL)
+                 color = "Gene — modality")
         ggplotly(apply_palette(p), tooltip = "text")
     })
 
@@ -864,7 +881,7 @@ server <- function(input, output, session) {
                                           "<br>z-score: ", round(z, 2),
                                           "<br>raw value: ", round(value, 2)))) +
             geom_tile(color = "white") +
-            facet_wrap(~ modality, nrow = 1) +
+            facet_wrap(~ modality, nrow = 1, labeller = modality_labeller) +
             theme_minimal(base_size = 11) +
             theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
             labs(x = NULL, y = NULL)
@@ -881,7 +898,8 @@ server <- function(input, output, session) {
                                           "<br>stage: ", pair_label,
                                           "<br>value: ", round(value, 2)))) +
             geom_tile(color = "white") +
-            facet_wrap(~ modality, nrow = 1, scales = "free") +
+            facet_wrap(~ modality, nrow = 1, scales = "free",
+                       labeller = modality_labeller) +
             theme_minimal(base_size = 11) +
             theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
             labs(x = NULL, y = NULL)
