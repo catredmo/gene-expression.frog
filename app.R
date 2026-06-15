@@ -20,45 +20,6 @@ library(plotly)
 library(DT)
 library(readr)
 
-# ---- Memory instrumentation ----
-# Returns process RSS (resident set size) in MB on macOS/Linux, plus R's
-# internally tracked heap usage. RSS is what OpenShift / container limits
-# care about; the R heap (gc) tracks live R objects only.
-read_rss_mb <- function() {
-    if (Sys.info()[["sysname"]] == "Darwin") {
-        out <- try(system(sprintf("ps -o rss= -p %d", Sys.getpid()),
-                          intern = TRUE, ignore.stderr = TRUE),
-                   silent = TRUE)
-        if (!inherits(out, "try-error") && length(out)) {
-            return(as.numeric(out) / 1024)  # KB -> MB
-        }
-    } else if (file.exists("/proc/self/status")) {
-        lines <- readLines("/proc/self/status", warn = FALSE)
-        rss_line <- grep("^VmRSS:", lines, value = TRUE)
-        if (length(rss_line)) {
-            kb <- as.numeric(sub(".*?(\\d+).*", "\\1", rss_line))
-            return(kb / 1024)
-        }
-    }
-    NA_real_
-}
-
-mem_snapshot <- function() {
-    g <- gc(verbose = FALSE)
-    # gc() returns a matrix with non-unique column names ("(Mb)" appears
-    # multiple times). Column count differs by OS: macOS includes a
-    # "limit (Mb)" column that Linux omits. Locate Mb columns by name -
-    # first is current usage, last is peak.
-    mb_idx <- which(colnames(g) == "(Mb)")
-    used_mb <- if (length(mb_idx)) sum(g[, mb_idx[1]]) else NA_real_
-    peak_mb <- if (length(mb_idx)) sum(g[, mb_idx[length(mb_idx)]]) else NA_real_
-    list(
-        rss_mb    = read_rss_mb(),
-        r_used_mb = used_mb,
-        r_peak_mb = peak_mb
-    )
-}
-
 # ---- File locations ----
 # The app supports two layouts:
 #   1) Development:        data files live in ../cluster_reanalysis/...
@@ -239,12 +200,7 @@ ui <- fluidPage(
                                     "Magma" = "magma",
                                     "Plasma" = "plasma",
                                     "Cividis" = "cividis"),
-                        selected = "RdBu"),
-            hr(),
-            h5("Memory usage"),
-            verbatimTextOutput("mem_status", placeholder = TRUE),
-            helpText(em("Refreshes every 2 s. RSS = total process memory ",
-                        "(what OpenShift would limit). R-heap = live R objects only."))
+                        selected = "RdBu")
         ),
         mainPanel(
             width = 9,
@@ -315,7 +271,20 @@ ui <- fluidPage(
                                       br(),
                                       p("Top: bar chart of raw TPM. ",
                                         "Middle: Z-scored tissue specificity. ",
-                                        "Bottom: raw log10(TPM+1) for absolute comparison across tissues."))
+                                        "Bottom: raw log10(TPM+1) for absolute comparison across tissues.")),
+                             tabPanel("Developmental table",
+                                      br(),
+                                      DTOutput("table_rna_dev"),
+                                      br(),
+                                      p("TPM per gene across 11 developmental stages. ",
+                                        "Rows filtered by the gene selection in the sidebar. ",
+                                        "Use the Copy / CSV / Excel buttons to download.")),
+                             tabPanel("Adult tissue table",
+                                      br(),
+                                      DTOutput("table_rna_tissue"),
+                                      br(),
+                                      p("TPM per gene across 13 adult tissues. ",
+                                        "Rows filtered by the gene selection in the sidebar."))
                          )),
                 tabPanel("Combined (matched stages)",
                          br(),
@@ -346,25 +315,6 @@ ui <- fluidPage(
 
 # ---- Server ----
 server <- function(input, output, session) {
-
-    # Track peak RSS observed during the session (gc()'s max-used resets on R
-    # process restart, but RSS does not auto-track its own peak so we do it here).
-    peak_rss <- reactiveVal(0)
-
-    output$mem_status <- renderText({
-        invalidateLater(2000, session)
-        m <- mem_snapshot()
-        if (!is.na(m$rss_mb) && m$rss_mb > peak_rss()) peak_rss(m$rss_mb)
-        rss_now  <- if (is.na(m$rss_mb)) "n/a" else sprintf("%.0f MB", m$rss_mb)
-        rss_peak <- if (peak_rss() == 0) "n/a" else sprintf("%.0f MB", peak_rss())
-        sprintf("RSS now:      %s\nRSS peak:     %s\nR-heap now:   %.0f MB\nR-heap peak:  %.0f MB",
-                rss_now, rss_peak, m$r_used_mb, m$r_peak_mb)
-    })
-
-    # One-time baseline log at session start
-    cat(sprintf("[mem] session start | RSS: %s | R-heap: %.0f MB\n",
-                {b <- mem_snapshot(); if(is.na(b$rss_mb)) "n/a" else sprintf("%.0f MB", b$rss_mb)},
-                mem_snapshot()$r_used_mb))
 
     # ---- Documentation modal ----
     observeEvent(input$show_docs, {
@@ -866,6 +816,34 @@ server <- function(input, output, session) {
             formatRound(c("ReferenceIntensity",
                           grep("^Rep[AB]_", names(abund_raw), value = TRUE)),
                         digits = 2)
+    })
+
+    output$table_rna_dev <- renderDT({
+        req(input$genes)
+        df <- rna_dev %>% filter(Geneid %in% input$genes)
+        validate(need(nrow(df) > 0, "No Session 2016 dev RNA-seq for selection."))
+        datatable(
+            df,
+            extensions = "Buttons",
+            options = list(pageLength = 25, scrollX = TRUE,
+                           dom = "Bfrtip", buttons = c("copy", "csv", "excel")),
+            rownames = FALSE
+        ) %>%
+            formatRound(DEV_STAGES_RNA, digits = 2)
+    })
+
+    output$table_rna_tissue <- renderDT({
+        req(input$genes)
+        df <- rna_tissue %>% filter(Geneid %in% input$genes)
+        validate(need(nrow(df) > 0, "No Session 2016 tissue RNA-seq for selection."))
+        datatable(
+            df,
+            extensions = "Buttons",
+            options = list(pageLength = 25, scrollX = TRUE,
+                           dom = "Bfrtip", buttons = c("copy", "csv", "excel")),
+            rownames = FALSE
+        ) %>%
+            formatRound(TISSUES_RNA, digits = 2)
     })
 
     output$table_sites <- renderDT({
