@@ -149,6 +149,7 @@ genes_union <- sort(unique(c(genes_all, rna_genes, all_phos_genes)))
 
 # ---- UI ----
 ui <- fluidPage(
+    tags$head(tags$title("Xenopus laevis gene expression explorer")),
     titlePanel(HTML("<em>Xenopus laevis</em> gene expression explorer")),
     p(em("Mass spectrometry: Van Itallie 2025 reanalysis (FragPipe Rep A+B + Rep C phospho) | ",
          "RNA-seq: Session et al. 2016 reanalysis (TPM, developmental + adult tissues)")),
