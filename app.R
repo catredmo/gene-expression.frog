@@ -448,12 +448,24 @@ server <- function(input, output, session) {
                         "Nieuwkoop-Faber correspondence (Egg, St9, St12, St30, St40/41). ",
                         "Intermediate proteomics stages (St18, St22, St24, St26, St46) ",
                         "have no exact RNA-seq counterpart."),
-                tags$li(strong("Phospho coverage:"),
-                        " currently keratin-only. The all-proteins ",
-                        "phospho extraction (Rep A/B against the corrected database) ",
-                        "is a planned addition.")
+                tags$li(strong("Phospho data sources:"),
+                        " two distinct re-searches are available - the ",
+                        em("keratin"), " tab uses Rep C against the krt12.4.S-corrected ",
+                        "FASTA (only place the head-restored krt12.4.S peptides appear), ",
+                        "and the ", em("all phosphosites"), " tabs use Rep A+B against ",
+                        "the standard v10.1 FASTA (broader coverage but uncorrected).")
             ),
-            tags$p(em("Last updated: 2026-06-05. Data is subject to revision as ",
+
+            tags$hr(),
+
+            tags$h4("Source code"),
+            tags$p("The app and its underlying data TSVs are version-controlled at ",
+                   tags$a(href = "https://github.com/catredmo/gene-expression.frog",
+                          target = "_blank",
+                          tags$code("github.com/catredmo/gene-expression.frog")),
+                   ". Pull requests and issues welcome."),
+
+            tags$p(em("Last updated: 2026-06-15. Data is subject to revision as ",
                       "the underlying gene model corrections progress."))
         ))
     })
