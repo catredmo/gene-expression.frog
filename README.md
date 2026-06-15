@@ -57,16 +57,6 @@ install.packages(c("shiny", "dplyr", "tidyr", "ggplot2",
 - Light traffic (designed for a small lab + collaborators; typically
   1-3 concurrent users).
 
-## Deploying for shared access
-
-Three reasonable paths:
-
-1. **U-M LSA Web Hosting (OpenShift)** — preferred for unpublished
-   data; supports U-M Weblogin gating. Contact LSA Research IT.
-2. **shinyapps.io paid tier (~$9/mo)** — fastest path to a stable URL;
-   private mode available with auth token.
-3. **Local R** — for a single user, `shiny::runApp(".")` is sufficient.
-
 ## Updating the data
 
 Replace any of the five TSVs in this directory with newer versions; the
