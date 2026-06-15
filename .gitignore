@@ -1,0 +1,19 @@
+# R / RStudio
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+*.Rproj
+
+# macOS
+.DS_Store
+
+# renv (if added later)
+renv/library/
+renv/python/
+renv/staging/
+
+# Editor
+.vscode/
+.idea/
+*.swp

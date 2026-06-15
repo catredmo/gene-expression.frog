@@ -1,0 +1,886 @@
+# Xenopus developmental proteomics browser (Van Itallie 2025 reanalysis)
+#
+# Protein-level data: FragPipe combined output (Rep A + Rep B, TMT 11-plex)
+#   ../cluster_reanalysis/fragpipe/tmt-report/abundance_gene_MD.tsv
+#     14,540 proteins x (RepA: 11 stages, RepB: 11 stages)
+#     MSstatsTMT-normalized log2 abundances (relative to channel-median ref)
+#
+# Phosphosite data: Rep C re-search against krt12.4.S-corrected DB
+#   ../cluster_reanalysis/keratin_phospho_sites_perstage.tsv
+#     40 phosphosites (keratin only; broader phosphosite extraction TBD)
+#
+# Run locally:
+#   shiny::runApp("shiny_keratin_browser")
+
+library(shiny)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(plotly)
+library(DT)
+library(readr)
+
+# ---- Memory instrumentation ----
+# Returns process RSS (resident set size) in MB on macOS/Linux, plus R's
+# internally tracked heap usage. RSS is what OpenShift / container limits
+# care about; the R heap (gc) tracks live R objects only.
+read_rss_mb <- function() {
+    if (Sys.info()[["sysname"]] == "Darwin") {
+        out <- try(system(sprintf("ps -o rss= -p %d", Sys.getpid()),
+                          intern = TRUE, ignore.stderr = TRUE),
+                   silent = TRUE)
+        if (!inherits(out, "try-error") && length(out)) {
+            return(as.numeric(out) / 1024)  # KB -> MB
+        }
+    } else if (file.exists("/proc/self/status")) {
+        lines <- readLines("/proc/self/status", warn = FALSE)
+        rss_line <- grep("^VmRSS:", lines, value = TRUE)
+        if (length(rss_line)) {
+            kb <- as.numeric(sub(".*?(\\d+).*", "\\1", rss_line))
+            return(kb / 1024)
+        }
+    }
+    NA_real_
+}
+
+mem_snapshot <- function() {
+    g <- gc(verbose = FALSE)
+    # gc() returns a matrix whose colnames are not unique; positions are stable:
+    # col 2 = current Mb used, col 7 = peak Mb used.
+    list(
+        rss_mb    = read_rss_mb(),
+        r_used_mb = sum(g[, 2]),
+        r_peak_mb = sum(g[, 7])
+    )
+}
+
+# ---- File locations ----
+# The app supports two layouts:
+#   1) Development:        data files live in ../cluster_reanalysis/...
+#   2) Self-contained:     all data files sit next to app.R (preferred for deployment)
+
+resolve_data_file <- function(filename, dev_subpath) {
+    # Self-contained first (next to app.R), then development location
+    if (file.exists(filename)) return(filename)
+    dev_path <- file.path("..", "cluster_reanalysis", dev_subpath, filename)
+    if (file.exists(dev_path)) return(dev_path)
+    stop("Cannot find data file '", filename, "'. ",
+         "Place it next to app.R, or place app.R in shiny_keratin_browser/ ",
+         "alongside the original cluster_reanalysis/ directory.")
+}
+
+ABUND_TSV      <- resolve_data_file("abundance_gene_MD.tsv",
+                                    "fragpipe/tmt-report")
+SITES_TSV      <- resolve_data_file("keratin_phospho_sites_perstage.tsv", ".")
+PEPS_TSV       <- resolve_data_file("keratin_peptides_all_perstage.tsv", ".")
+RNA_DEV_TSV    <- resolve_data_file("session2016_dev_tpm.tsv", ".")
+RNA_TISSUE_TSV <- resolve_data_file("session2016_tissue_tpm.tsv", ".")
+
+DEV_STAGES_RNA <- c("egg", "st08", "st09", "st10", "st12", "st15",
+                    "st20", "st25", "st30", "st35", "st40")
+TISSUES_RNA <- c("brain", "heart", "intestine", "kidney", "liver", "lung",
+                 "muscle", "ovary", "pancreas", "skin", "spleen", "stomach",
+                 "testis")
+
+# Cross-modality stage mapping for the combined view.
+# Only stages where the proteomics TMT channel and the Session 2016 RNA-seq
+# stage are at the same (or near-identical) Nieuwkoop-Faber stage. Stages
+# without a confident pair (Oocyte_VI, St18/St22/St24/St26, St46) are omitted
+# rather than wrongly aligned.
+MATCHED_STAGES <- data.frame(
+    pair_label = c("Egg",  "St9",   "St12",  "St30",  "St40/41"),
+    prot_stage = c("Egg",  "St9",   "St12",  "St30",  "St41"),
+    rna_stage  = c("egg",  "st09",  "st12",  "st30",  "st40"),
+    stringsAsFactors = FALSE
+)
+
+STAGES <- c("Oocyte_VI", "Egg", "St9", "St12", "St18",
+            "St22", "St24", "St26", "St30", "St41", "St46")
+CHANNELS <- c("126", "127N", "127C", "128N", "128C",
+              "129N", "129C", "130N", "130C", "131N", "131C")
+INT_COLS <- paste0("intensity_", CHANNELS, "_", STAGES)
+
+# ---- Helper: pull gene name from RefSeq:NP_XXXX|gene|... index strings ----
+extract_gene <- function(s) {
+    parts <- strsplit(s, "|", fixed = TRUE)
+    vapply(parts, function(p) if (length(p) >= 2) p[2] else p[1], character(1))
+}
+
+# ---- Load protein-level abundance ----
+abund_raw <- read_tsv(ABUND_TSV, show_col_types = FALSE)
+
+# The TSV repeats stage column names (RepA stages then RepB stages). Rename
+# columns positionally: first 5 = metadata, next 11 = RepA, next 11 = RepB.
+stopifnot(ncol(abund_raw) == 5 + length(STAGES) * 2)
+names(abund_raw)[6:16]  <- paste0("RepA_", STAGES)
+names(abund_raw)[17:27] <- paste0("RepB_", STAGES)
+abund_raw$gene <- extract_gene(abund_raw$Index)
+abund_raw <- abund_raw %>%
+    relocate(gene, .before = Index) %>%
+    filter(!is.na(gene) & gene != "")
+
+genes_all <- sort(unique(abund_raw$gene))
+
+abund_long <- abund_raw %>%
+    pivot_longer(matches("^Rep[AB]_"),
+                 names_to = c("rep", "stage"),
+                 names_pattern = "^(Rep[AB])_(.+)$",
+                 values_to = "log2_abundance") %>%
+    mutate(stage = factor(stage, levels = STAGES))
+
+# ---- Load keratin phosphosite data (Rep C) ----
+sites_raw <- read_tsv(SITES_TSV, show_col_types = FALSE)
+sites_raw <- sites_raw %>%
+    arrange(desc(best_delta_score)) %>%
+    distinct(gene, site_position, residue, .keep_all = TRUE) %>%
+    mutate(confidence_tier = case_when(
+        best_delta_score >= 0.3 ~ "high",
+        best_delta_score >= 0.1 ~ "medium",
+        TRUE ~ "low"
+    ))
+
+long_sites <- sites_raw %>%
+    mutate(label = paste0(gene, " ", residue, site_position)) %>%
+    pivot_longer(all_of(INT_COLS),
+                 names_to = "stage_col", values_to = "intensity") %>%
+    mutate(stage = factor(sub("intensity_[^_]+_", "", stage_col), levels = STAGES))
+
+phospho_genes <- sort(unique(sites_raw$gene))
+
+# ---- Load Session 2016 RNA-seq TPM (pre-computed) ----
+rna_dev <- read_tsv(RNA_DEV_TSV, show_col_types = FALSE)
+rna_tissue <- read_tsv(RNA_TISSUE_TSV, show_col_types = FALSE)
+
+rna_dev_long <- rna_dev %>%
+    pivot_longer(all_of(DEV_STAGES_RNA), names_to = "stage", values_to = "tpm") %>%
+    mutate(stage = factor(stage, levels = DEV_STAGES_RNA))
+rna_tissue_long <- rna_tissue %>%
+    pivot_longer(all_of(TISSUES_RNA), names_to = "tissue", values_to = "tpm") %>%
+    mutate(tissue = factor(tissue, levels = TISSUES_RNA))
+
+# Union of gene names available in any data source (for the picker)
+rna_genes <- unique(c(rna_dev$Geneid, rna_tissue$Geneid))
+genes_union <- sort(unique(c(genes_all, rna_genes)))
+
+# ---- UI ----
+ui <- fluidPage(
+    titlePanel(HTML("<em>Xenopus laevis</em> gene expression explorer")),
+    p(em("Mass spectrometry: Van Itallie 2025 reanalysis (FragPipe Rep A+B + Rep C phospho) | ",
+         "RNA-seq: Session et al. 2016 reanalysis (TPM, developmental + adult tissues)")),
+    p(actionLink("show_docs",
+                 HTML("&#x1F4D6; <strong>Data sources &amp; methods</strong> (click to expand)"),
+                 style = "font-size: 14px;")),
+    sidebarLayout(
+        sidebarPanel(
+            width = 3,
+            h4("Gene selection"),
+            selectizeInput("genes", "Gene(s):",
+                           choices = NULL,
+                           multiple = TRUE),
+            helpText(sprintf("Choose from %s genes (proteomics + RNA-seq union). Start typing the gene name.",
+                             format(length(genes_union), big.mark=","))),
+            actionButton("preset_krt", "Keratin family", class = "btn-sm"),
+            actionButton("preset_dsm", "Desmosome", class = "btn-sm"),
+            actionButton("preset_ajc", "AJC", class = "btn-sm"),
+            br(), br(),
+            radioButtons("rep_mode", "Replicate display:",
+                         choices = c("Both reps overlaid" = "both",
+                                     "Mean +/- range" = "mean",
+                                     "RepA only" = "RepA",
+                                     "RepB only" = "RepB"),
+                         selected = "both"),
+            hr(),
+            h4("Phosphosite tab filters"),
+            helpText(em("Phospho data are currently keratin-only (Rep C re-search). ",
+                        "Use 'Phosphosite trajectory' tab.")),
+            checkboxGroupInput("tiers", "Confidence tier:",
+                               choices = c("high", "medium", "low"),
+                               selected = c("high", "medium")),
+            sliderInput("min_psms", "Minimum num_psms:",
+                        min = 1, max = max(sites_raw$num_psms), value = 1),
+            hr(),
+            h4("Plot customization"),
+            selectInput("palette", "Categorical palette (lines / bars):",
+                        choices = c("Default (ggplot)" = "default",
+                                    "Set1 (RColorBrewer)" = "Set1",
+                                    "Set2 (RColorBrewer)" = "Set2",
+                                    "Dark2 (RColorBrewer)" = "Dark2",
+                                    "Paired" = "Paired",
+                                    "Viridis (discrete)" = "viridis",
+                                    "Plasma (discrete)" = "plasma"),
+                        selected = "default"),
+            selectInput("point_shape", "Point shape:",
+                        choices = c("Filled circle" = "16",
+                                    "Open circle" = "1",
+                                    "Filled square" = "15",
+                                    "Open square" = "0",
+                                    "Filled triangle" = "17",
+                                    "Open triangle" = "2",
+                                    "Filled diamond" = "18",
+                                    "Open diamond" = "5",
+                                    "Plus" = "3",
+                                    "Cross" = "4",
+                                    "Asterisk" = "8"),
+                        selected = "16"),
+            sliderInput("point_size", "Point size:",
+                        min = 0.5, max = 6, value = 2.5, step = 0.5),
+            sliderInput("line_width", "Line width:",
+                        min = 0.3, max = 3, value = 0.8, step = 0.1),
+            selectInput("heatmap_palette", "Heatmap palette:",
+                        choices = c("Red-blue (diverging)" = "RdBu",
+                                    "Red-yellow-blue" = "RdYlBu",
+                                    "Purple-orange" = "PuOr",
+                                    "Viridis" = "viridis",
+                                    "Magma" = "magma",
+                                    "Plasma" = "plasma",
+                                    "Cividis" = "cividis"),
+                        selected = "RdBu"),
+            hr(),
+            h5("Memory usage"),
+            verbatimTextOutput("mem_status", placeholder = TRUE),
+            helpText(em("Refreshes every 2 s. RSS = total process memory ",
+                        "(what OpenShift would limit). R-heap = live R objects only."))
+        ),
+        mainPanel(
+            width = 9,
+            tabsetPanel(
+                id = "top_tabs", type = "tabs",
+                tabPanel("Mass spectrometry",
+                         br(),
+                         tabsetPanel(
+                             id = "ms_tabs", type = "pills",
+                             tabPanel("Protein abundance",
+                                      br(),
+                                      plotlyOutput("plot_protein", height = "520px"),
+                                      br(),
+                                      p("Log2 normalized abundance per developmental stage. ",
+                                        "Two TMT 11-plex replicates (RepA, RepB) overlaid by default. ",
+                                        "Values are MSstatsTMT-normalized log2 ratios relative to the channel median.")),
+                             tabPanel("Protein heatmaps",
+                                      br(),
+                                      h4("Z-scored (within gene, across stages)"),
+                                      plotlyOutput("plot_protein_hm", height = "500px"),
+                                      br(),
+                                      h4("Raw log2 abundance (MSstatsTMT-normalized)"),
+                                      plotlyOutput("plot_protein_hm_raw", height = "500px"),
+                                      br(),
+                                      p("Top: row-Z-scored so temporal patterns are comparable across proteins of different absolute abundance. ",
+                                        "Bottom: raw log2-normalized abundance (replicate-averaged) preserving absolute level. ",
+                                        "Diverging palettes work for both; switch to a sequential palette in the sidebar for raw values if preferred.")),
+                             tabPanel("Phosphosite trajectory (keratin)",
+                                      br(),
+                                      plotlyOutput("plot_sites", height = "520px"),
+                                      br(),
+                                      p("Phosphosite TMT intensity across stages. Filterable by confidence tier and PSM count.")),
+                             tabPanel("Protein table",
+                                      br(),
+                                      DTOutput("table_protein")),
+                             tabPanel("Phosphosite table",
+                                      br(),
+                                      DTOutput("table_sites"))
+                         )),
+                tabPanel("RNA-seq",
+                         br(),
+                         tabsetPanel(
+                             id = "rna_tabs", type = "pills",
+                             tabPanel("Developmental time course",
+                                      br(),
+                                      plotlyOutput("plot_rna_dev", height = "420px"),
+                                      br(),
+                                      h4("Z-scored (within gene, across stages)"),
+                                      plotlyOutput("plot_rna_dev_hm", height = "340px"),
+                                      br(),
+                                      h4("Raw log10(TPM+1)"),
+                                      plotlyOutput("plot_rna_dev_hm_raw", height = "340px"),
+                                      br(),
+                                      p("Top: line plot of log10(TPM+1) across stages. ",
+                                        "Middle: row-Z-scored heatmap so temporal shape is ",
+                                        "comparable across genes of different absolute expression. ",
+                                        "Bottom: raw log10(TPM+1) heatmap preserving absolute level. ",
+                                        "Session et al. 2016 reanalysis.")),
+                             tabPanel("Adult tissues",
+                                      br(),
+                                      plotlyOutput("plot_rna_tissue", height = "420px"),
+                                      br(),
+                                      h4("Z-scored (within gene, across tissues)"),
+                                      plotlyOutput("plot_rna_tissue_hm", height = "340px"),
+                                      br(),
+                                      h4("Raw log10(TPM+1)"),
+                                      plotlyOutput("plot_rna_tissue_hm_raw", height = "340px"),
+                                      br(),
+                                      p("Top: bar chart of raw TPM. ",
+                                        "Middle: Z-scored tissue specificity. ",
+                                        "Bottom: raw log10(TPM+1) for absolute comparison across tissues."))
+                         )),
+                tabPanel("Combined (matched stages)",
+                         br(),
+                         p(em("Cross-modality view at developmental stages where the ",
+                              "proteomics TMT channel and Session 2016 RNA-seq sample ",
+                              "are at the same (or near-identical) stage:"), br(),
+                           strong("Egg (Egg / egg), St9 (St9 / st09), St12 (St12 / st12), ",
+                                  "St30 (St30 / st30), St40/41 (St41 / st40)"), br(),
+                           "Both modalities are Z-scored across the matched stages, ",
+                           "so trajectory shape is comparable but absolute level is not."),
+                         br(),
+                         plotlyOutput("plot_combined", height = "520px"),
+                         br(),
+                         h4("Z-scored (within gene, within modality)"),
+                         plotlyOutput("plot_combined_hm", height = "360px"),
+                         br(),
+                         h4("Raw values (protein: log2 abundance; RNA: log10 TPM+1)"),
+                         plotlyOutput("plot_combined_hm_raw", height = "360px"),
+                         br(),
+                         p("Top: paired line plot (solid = protein log2 abundance, ",
+                           "dashed = RNA log10 TPM, both Z-scored per gene). ",
+                           "Middle: side-by-side Z-score heatmaps. ",
+                           "Bottom: side-by-side raw heatmaps; modalities use different units so each facet has its own color scale."))
+            )
+        )
+    )
+)
+
+# ---- Server ----
+server <- function(input, output, session) {
+
+    # Track peak RSS observed during the session (gc()'s max-used resets on R
+    # process restart, but RSS does not auto-track its own peak so we do it here).
+    peak_rss <- reactiveVal(0)
+
+    output$mem_status <- renderText({
+        invalidateLater(2000, session)
+        m <- mem_snapshot()
+        if (!is.na(m$rss_mb) && m$rss_mb > peak_rss()) peak_rss(m$rss_mb)
+        rss_now  <- if (is.na(m$rss_mb)) "n/a" else sprintf("%.0f MB", m$rss_mb)
+        rss_peak <- if (peak_rss() == 0) "n/a" else sprintf("%.0f MB", peak_rss())
+        sprintf("RSS now:      %s\nRSS peak:     %s\nR-heap now:   %.0f MB\nR-heap peak:  %.0f MB",
+                rss_now, rss_peak, m$r_used_mb, m$r_peak_mb)
+    })
+
+    # One-time baseline log at session start
+    cat(sprintf("[mem] session start | RSS: %s | R-heap: %.0f MB\n",
+                {b <- mem_snapshot(); if(is.na(b$rss_mb)) "n/a" else sprintf("%.0f MB", b$rss_mb)},
+                mem_snapshot()$r_used_mb))
+
+    # ---- Documentation modal ----
+    observeEvent(input$show_docs, {
+        showModal(modalDialog(
+            title = "Data sources & methods",
+            size = "l",
+            easyClose = TRUE,
+            footer = modalButton("Close"),
+
+            tags$h4("Mass spectrometry"),
+            tags$p(strong("Source:"), " Van Itallie ES ", em("et al."),
+                   " (2025) developmental proteomics of ", em("Xenopus laevis"), ". ",
+                   "Raw data: PRIDE accession ", strong("PXD060481"), "."),
+            tags$p(strong("Design:"), " three TMT 11-plex SPS-MS3 replicates ",
+                   "(Rep A, Rep B, Rep C) sampling 11 Nieuwkoop-Faber stages: ",
+                   "Oocyte_VI, Egg, St9, St12, St18, St22, St24, St26, St30, St41, St46. ",
+                   "Static mods: TMT11-plex on N-term/K, NEM on Cys. ",
+                   "Variable mods: Met oxidation, Asn deamidation, ",
+                   "phospho on S/T/Y (phospho searches only)."),
+            tags$p(strong("Reanalysis pipeline (this app uses both outputs):")),
+            tags$ul(
+                tags$li(strong("Protein abundance"), " (Rep A + Rep B): ",
+                        "FragPipe / MSFragger search against ",
+                        em("Xenopus laevis"), " Xenbase v10.1 with corrected keratin ",
+                        "FASTA, MSstatsTMT normalisation. ",
+                        "Source file: ", tags$code("abundance_gene_MD.tsv"),
+                        " (14,241 proteins, two replicates, log2 normalised)."),
+                tags$li(strong("Phosphosites"), " (Rep C): ",
+                        "Comet search against the krt12.4.S head-restored corrected ",
+                        "FASTA. FDR 1% PSM-level. Phospho positions localised by ",
+                        "delta-score (rank1 - rank2 xcorr). Confidence tiers: ",
+                        em("high"), " (delta >= 0.3), ", em("medium"), " (>= 0.1), ",
+                        em("low"), " (< 0.1). ",
+                        tags$strong("Currently keratin-only"),
+                        " - broader phosphosite extraction is planned.")
+            ),
+            tags$p(strong("Key correction applied:"), " the Xenbase v10.1 ",
+                   "annotation of krt12.4.S (NP_001079456.1, 375 aa) was found to ",
+                   "be truncated. The full-length 435-aa form (60-aa N-terminal ",
+                   "head restored from the alternative ATG at Chr9_10S:1162844) ",
+                   "was used in the reanalysis. MS data directly confirms the ",
+                   "full-length form (15+ PSMs across the head N-term peptide; ",
+                   "zero PSMs for the truncated-form N-term)."),
+
+            tags$hr(),
+
+            tags$h4("RNA-seq"),
+            tags$p(strong("Source:"), " Session AM ", em("et al."),
+                   " (2016) ", em("Genome evolution in the allotetraploid frog "),
+                   em("Xenopus laevis"), ". ", em("Nature"), " 538, 336-343. ",
+                   "GEO accession ", strong("GSE73430"),
+                   " / BioProject PRJNA313977."),
+            tags$p(strong("Developmental time course (11 samples):"),
+                   " egg, st08, st09, st10, st12, st15, st20, st25, st30, st35, st40. ",
+                   "Single-replicate per stage."),
+            tags$p(strong("Adult tissue panel (13 samples):"),
+                   " brain, heart, intestine, kidney, liver, lung, muscle, ovary, ",
+                   "pancreas, skin, spleen, stomach, testis."),
+            tags$p(strong("Reanalysis pipeline:"),
+                   " HISAT2 alignment to Xenbase v10.1 ", em("X. laevis"),
+                   " genome, featureCounts quantification, ",
+                   "TPM normalisation per sample. ",
+                   "Source files: ", tags$code("session2016_dev_tpm.tsv"),
+                   " (42,675 genes × 11 stages), ",
+                   tags$code("session2016_tissue_tpm.tsv"),
+                   " (42,675 genes × 13 tissues)."),
+
+            tags$hr(),
+
+            tags$h4("Notes / caveats"),
+            tags$ul(
+                tags$li(strong("Nomenclature:"),
+                        " The proteomics keratin gene symbols have been harmonised ",
+                        "to match the post-2018 Xenbase RNA-seq nomenclature: ",
+                        tags$code("krt8.L"), " -> ", tags$code("krt8.1.L"), ", ",
+                        tags$code("krt8.S"), " -> ", tags$code("krt8.1.S"), ", ",
+                        tags$code("krt18.L"), " -> ", tags$code("krt18.1.L"), ", ",
+                        tags$code("krt18.S"), " -> ", tags$code("krt18.1.S"), ", ",
+                        tags$code("krt15.S"), " -> ", tags$code("krt15.1.S"), ", ",
+                        tags$code("krt78.L"), " -> ", tags$code("krt78.1.L"),
+                        ". The entry labelled ", tags$code("krt12.L"),
+                        " is deliberately kept under its legacy symbol because the ",
+                        "Xenbase v10.1 gene model is a corrupted prediction (a ",
+                        "truncated krt23.L missing the N-terminal 38 aa) - treat with caution."),
+                tags$li(strong("Stage matching:"),
+                        " the Combined tab pairs only stages with confident ",
+                        "Nieuwkoop-Faber correspondence (Egg, St9, St12, St30, St40/41). ",
+                        "Intermediate proteomics stages (St18, St22, St24, St26, St46) ",
+                        "have no exact RNA-seq counterpart."),
+                tags$li(strong("Phospho coverage:"),
+                        " currently keratin-only. The all-proteins ",
+                        "phospho extraction (Rep A/B against the corrected database) ",
+                        "is a planned addition.")
+            ),
+            tags$p(em("Last updated: 2026-06-05. Data is subject to revision as ",
+                      "the underlying gene model corrections progress."))
+        ))
+    })
+
+    # Populate gene selector server-side (efficient with 40k+ genes)
+    updateSelectizeInput(session, "genes",
+                         choices = genes_union,
+                         selected = c("krt19.L", "krt19.S"),
+                         server = TRUE)
+
+    observeEvent(input$preset_krt, {
+        krt <- grep("^krt", genes_union, value = TRUE)
+        updateSelectizeInput(session, "genes", selected = krt[1:min(20, length(krt))],
+                             choices = genes_union, server = TRUE)
+    })
+    observeEvent(input$preset_dsm, {
+        dsm <- intersect(genes_union,
+                         c("dsg2.L","dsg2.S","dsg3.L","dsg3.S","dsc1.L","dsc1.S",
+                           "dsc2.L","dsc2.S","dsp.L","dsp.S","pkp1.L","pkp1.S",
+                           "pkp3.L","pkp3.S","jup.L","jup.S","pgr.L","pgr.S"))
+        updateSelectizeInput(session, "genes", selected = dsm,
+                             choices = genes_union, server = TRUE)
+    })
+    observeEvent(input$preset_ajc, {
+        ajc <- intersect(genes_union,
+                         c("cdh1.L","cdh1.S","cdh3.L","cdh3.S","ctnna1.L","ctnna1.S",
+                           "ctnnb1.L","ctnnb1.S","ctnnd1.L","ctnnd1.S","tjp1.L","tjp1.S",
+                           "tjp2.L","tjp2.S","jam2.L","jam2.S","cldn1.L","cldn1.S",
+                           "ocln.L","ocln.S","afdn.L","afdn.S"))
+        updateSelectizeInput(session, "genes", selected = ajc,
+                             choices = genes_union, server = TRUE)
+    })
+
+    sel <- reactive({
+        req(input$genes)
+        abund_long %>% filter(gene %in% input$genes)
+    })
+
+    output$plot_protein <- renderPlotly({
+        df <- sel()
+        validate(need(nrow(df) > 0, "No data for the selected gene(s)."))
+
+        if (input$rep_mode == "mean") {
+            df2 <- df %>%
+                group_by(gene, stage) %>%
+                summarise(mean_abund = mean(log2_abundance, na.rm = TRUE),
+                          lo = min(log2_abundance, na.rm = TRUE),
+                          hi = max(log2_abundance, na.rm = TRUE),
+                          .groups = "drop")
+            p <- ggplot(df2, aes(x = stage, y = mean_abund, group = gene, color = gene,
+                                 text = paste0("gene: ", gene,
+                                               "<br>stage: ", stage,
+                                               "<br>mean log2: ", round(mean_abund, 2),
+                                               "<br>range: ", round(lo, 2), " - ", round(hi, 2)))) +
+                geom_ribbon(aes(ymin = lo, ymax = hi, fill = gene),
+                            alpha = 0.15, color = NA) +
+                geom_line(linewidth = ln_width()) + geom_point(size = pt_size(), shape = pt_shape())
+        } else {
+            if (input$rep_mode %in% c("RepA", "RepB")) {
+                df <- df %>% filter(rep == input$rep_mode)
+            }
+            p <- ggplot(df, aes(x = stage, y = log2_abundance,
+                                group = interaction(gene, rep),
+                                color = gene, linetype = rep,
+                                text = paste0("gene: ", gene,
+                                              "<br>rep: ", rep,
+                                              "<br>stage: ", stage,
+                                              "<br>log2 abundance: ", round(log2_abundance, 2)))) +
+                geom_line(linewidth = ln_width()) + geom_point(size = pt_size(), shape = pt_shape())
+        }
+        p <- p + theme_minimal(base_size = 12) +
+            theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+            labs(x = NULL, y = "log2 abundance (MSstatsTMT-normalized)",
+                 color = NULL, linetype = NULL)
+        ggplotly(apply_palette(p), tooltip = "text")
+    })
+
+    output$plot_protein_hm <- renderPlotly({
+        df <- sel()
+        validate(need(nrow(df) > 0, "No data for the selected gene(s)."))
+        mat <- df %>%
+            group_by(gene, stage) %>%
+            summarise(mean_abund = mean(log2_abundance, na.rm = TRUE), .groups = "drop") %>%
+            group_by(gene) %>%
+            mutate(z = if (sd(mean_abund, na.rm = TRUE) > 0)
+                       (mean_abund - mean(mean_abund, na.rm = TRUE)) /
+                           sd(mean_abund, na.rm = TRUE)
+                   else 0) %>%
+            ungroup()
+        p <- ggplot(mat, aes(x = stage, y = gene, fill = z,
+                             text = paste0(gene,
+                                           "<br>stage: ", stage,
+                                           "<br>z-score: ", round(z, 2),
+                                           "<br>mean log2 abundance: ", round(mean_abund, 2)))) +
+            geom_tile(color = "white") +
+            theme_minimal(base_size = 11) +
+            theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+            labs(x = NULL, y = NULL)
+        ggplotly(apply_heatmap_palette(p), tooltip = "text")
+    })
+
+    output$plot_sites <- renderPlotly({
+        df <- long_sites %>%
+            filter(gene %in% input$genes,
+                   confidence_tier %in% input$tiers,
+                   num_psms >= input$min_psms)
+        validate(need(nrow(df) > 0,
+                      "No phosphosites for the selected genes + filters. ",
+                      "Note: phospho data are currently keratin-only (Rep C)."))
+        p <- ggplot(df, aes(x = stage, y = intensity, group = label, color = label,
+                            text = paste0(label,
+                                          "<br>tier: ", confidence_tier,
+                                          "<br>num_psms: ", num_psms,
+                                          "<br>stage: ", stage,
+                                          "<br>intensity: ",
+                                          formatC(intensity, format = "g", digits = 4)))) +
+            geom_line(alpha = 0.8, linewidth = ln_width()) +
+            geom_point(size = pt_size(), shape = pt_shape()) +
+            scale_y_log10(labels = scales::label_number(big.mark = ",")) +
+            theme_minimal(base_size = 12) +
+            theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+            labs(x = NULL, y = "TMT intensity", color = NULL)
+        ggplotly(apply_palette(p), tooltip = "text")
+    })
+
+    # ---- Plot styling helpers (driven by sidebar customization inputs) ----
+    pt_shape <- reactive(as.numeric(input$point_shape))
+    pt_size  <- reactive(input$point_size)
+    ln_width <- reactive(input$line_width)
+
+    apply_palette <- function(p) {
+        pal <- input$palette
+        if (is.null(pal) || pal == "default") return(p)
+        if (pal %in% c("Set1", "Set2", "Dark2", "Paired")) {
+            return(p + scale_color_brewer(palette = pal, na.value = "grey50") +
+                   scale_fill_brewer(palette = pal, na.value = "grey50"))
+        }
+        opt <- switch(pal, "viridis" = "viridis", "plasma" = "plasma")
+        p + scale_color_viridis_d(option = opt) +
+            scale_fill_viridis_d(option = opt)
+    }
+
+    apply_heatmap_palette <- function(p) {
+        pal <- input$heatmap_palette
+        if (is.null(pal)) pal <- "RdBu"
+        diverging_endpoints <- list(
+            RdBu  = c(low = "#2166AC", mid = "white", high = "#B2182B"),
+            RdYlBu = c(low = "#4575B4", mid = "#FFFFBF", high = "#D73027"),
+            PuOr  = c(low = "#542788", mid = "white", high = "#B35806")
+        )
+        if (pal %in% names(diverging_endpoints)) {
+            ep <- diverging_endpoints[[pal]]
+            return(p + scale_fill_gradient2(low = ep["low"], mid = ep["mid"],
+                                            high = ep["high"], midpoint = 0,
+                                            name = "z-score"))
+        }
+        opt <- switch(pal,
+                      "viridis" = "viridis",
+                      "magma" = "magma",
+                      "plasma" = "plasma",
+                      "cividis" = "cividis",
+                      "viridis")
+        p + scale_fill_viridis_c(option = opt, name = "z-score")
+    }
+
+    zscore_by_group <- function(df, group_col, value_col) {
+        df %>%
+            group_by(.data[[group_col]]) %>%
+            mutate(z = if (sd(.data[[value_col]], na.rm = TRUE) > 0)
+                       (.data[[value_col]] - mean(.data[[value_col]], na.rm = TRUE)) /
+                           sd(.data[[value_col]], na.rm = TRUE)
+                   else 0) %>%
+            ungroup()
+    }
+
+    output$plot_protein_hm_raw <- renderPlotly({
+        df <- sel()
+        validate(need(nrow(df) > 0, "No data for the selected gene(s)."))
+        mat <- df %>%
+            group_by(gene, stage) %>%
+            summarise(mean_abund = mean(log2_abundance, na.rm = TRUE), .groups = "drop")
+        p <- ggplot(mat, aes(x = stage, y = gene, fill = mean_abund,
+                             text = paste0(gene,
+                                           "<br>stage: ", stage,
+                                           "<br>log2 abundance: ", round(mean_abund, 2)))) +
+            geom_tile(color = "white") +
+            theme_minimal(base_size = 11) +
+            theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+            labs(x = NULL, y = NULL)
+        ggplotly(apply_heatmap_palette(p), tooltip = "text")
+    })
+
+    output$plot_rna_dev <- renderPlotly({
+        req(input$genes)
+        df <- rna_dev_long %>% filter(Geneid %in% input$genes)
+        validate(need(nrow(df) > 0,
+                      "No Session 2016 developmental RNA-seq for the selected gene(s). ",
+                      "(Nomenclature mismatch? krt8.L (protein) -> krt8.1.L (RNA), etc.)"))
+        p <- ggplot(df, aes(x = stage, y = tpm + 1, group = Geneid, color = Geneid,
+                            text = paste0("gene: ", Geneid,
+                                          "<br>stage: ", stage,
+                                          "<br>TPM: ", round(tpm, 2)))) +
+            geom_line(linewidth = ln_width()) + geom_point(size = pt_size(), shape = pt_shape()) +
+            scale_y_log10(labels = scales::label_number(big.mark = ",")) +
+            theme_minimal(base_size = 12) +
+            theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+            labs(x = NULL, y = "TPM + 1 (log10)", color = NULL)
+        ggplotly(apply_palette(p), tooltip = "text")
+    })
+
+    output$plot_rna_dev_hm <- renderPlotly({
+        req(input$genes)
+        df <- rna_dev_long %>%
+            filter(Geneid %in% input$genes) %>%
+            zscore_by_group("Geneid", "tpm")
+        validate(need(nrow(df) > 0, "No Session 2016 dev RNA-seq for selection."))
+        p <- ggplot(df, aes(x = stage, y = Geneid, fill = z,
+                            text = paste0(Geneid,
+                                          "<br>stage: ", stage,
+                                          "<br>z-score: ", round(z, 2),
+                                          "<br>TPM: ", round(tpm, 2)))) +
+            geom_tile(color = "white") +
+            theme_minimal(base_size = 11) +
+            theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+            labs(x = NULL, y = NULL)
+        ggplotly(apply_heatmap_palette(p), tooltip = "text")
+    })
+
+    output$plot_rna_dev_hm_raw <- renderPlotly({
+        req(input$genes)
+        df <- rna_dev_long %>%
+            filter(Geneid %in% input$genes) %>%
+            mutate(log10_tpm = log10(tpm + 1))
+        validate(need(nrow(df) > 0, "No Session 2016 dev RNA-seq for selection."))
+        p <- ggplot(df, aes(x = stage, y = Geneid, fill = log10_tpm,
+                            text = paste0(Geneid,
+                                          "<br>stage: ", stage,
+                                          "<br>log10(TPM+1): ", round(log10_tpm, 2),
+                                          "<br>TPM: ", round(tpm, 2)))) +
+            geom_tile(color = "white") +
+            theme_minimal(base_size = 11) +
+            theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+            labs(x = NULL, y = NULL)
+        ggplotly(apply_heatmap_palette(p), tooltip = "text")
+    })
+
+    output$plot_rna_tissue <- renderPlotly({
+        req(input$genes)
+        df <- rna_tissue_long %>% filter(Geneid %in% input$genes)
+        validate(need(nrow(df) > 0,
+                      "No Session 2016 adult-tissue RNA-seq for the selected gene(s)."))
+        p <- ggplot(df, aes(x = tissue, y = tpm, fill = Geneid,
+                            text = paste0("gene: ", Geneid,
+                                          "<br>tissue: ", tissue,
+                                          "<br>TPM: ", round(tpm, 2)))) +
+            geom_col(position = position_dodge(width = 0.85)) +
+            theme_minimal(base_size = 12) +
+            theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+            labs(x = NULL, y = "TPM", fill = NULL)
+        ggplotly(apply_palette(p), tooltip = "text")
+    })
+
+    output$plot_rna_tissue_hm <- renderPlotly({
+        req(input$genes)
+        df <- rna_tissue_long %>%
+            filter(Geneid %in% input$genes) %>%
+            zscore_by_group("Geneid", "tpm")
+        validate(need(nrow(df) > 0, "No Session 2016 tissue RNA-seq for selection."))
+        p <- ggplot(df, aes(x = tissue, y = Geneid, fill = z,
+                            text = paste0(Geneid,
+                                          "<br>tissue: ", tissue,
+                                          "<br>z-score: ", round(z, 2),
+                                          "<br>TPM: ", round(tpm, 2)))) +
+            geom_tile(color = "white") +
+            theme_minimal(base_size = 11) +
+            theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+            labs(x = NULL, y = NULL)
+        ggplotly(apply_heatmap_palette(p), tooltip = "text")
+    })
+
+    output$plot_rna_tissue_hm_raw <- renderPlotly({
+        req(input$genes)
+        df <- rna_tissue_long %>%
+            filter(Geneid %in% input$genes) %>%
+            mutate(log10_tpm = log10(tpm + 1))
+        validate(need(nrow(df) > 0, "No Session 2016 tissue RNA-seq for selection."))
+        p <- ggplot(df, aes(x = tissue, y = Geneid, fill = log10_tpm,
+                            text = paste0(Geneid,
+                                          "<br>tissue: ", tissue,
+                                          "<br>log10(TPM+1): ", round(log10_tpm, 2),
+                                          "<br>TPM: ", round(tpm, 2)))) +
+            geom_tile(color = "white") +
+            theme_minimal(base_size = 11) +
+            theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+            labs(x = NULL, y = NULL)
+        ggplotly(apply_heatmap_palette(p), tooltip = "text")
+    })
+
+    # ---- Combined matched-stages view ----
+    combined_data <- reactive({
+        req(input$genes)
+        # Protein: average over RepA/RepB, restrict to matched proteomics stages
+        prot <- abund_long %>%
+            filter(gene %in% input$genes,
+                   as.character(stage) %in% MATCHED_STAGES$prot_stage) %>%
+            group_by(gene, stage) %>%
+            summarise(value = mean(log2_abundance, na.rm = TRUE), .groups = "drop") %>%
+            rename(Geneid = gene) %>%
+            left_join(MATCHED_STAGES %>%
+                          mutate(stage = factor(prot_stage, levels = STAGES)),
+                      by = "stage") %>%
+            mutate(modality = "Protein (log2 abundance)") %>%
+            select(Geneid, pair_label, value, modality)
+
+        # RNA: log10(TPM+1), restrict to matched RNA stages
+        rna <- rna_dev_long %>%
+            filter(Geneid %in% input$genes,
+                   as.character(stage) %in% MATCHED_STAGES$rna_stage) %>%
+            mutate(value = log10(tpm + 1)) %>%
+            left_join(MATCHED_STAGES %>%
+                          mutate(stage = factor(rna_stage, levels = DEV_STAGES_RNA)),
+                      by = "stage") %>%
+            mutate(modality = "RNA (log10 TPM+1)") %>%
+            select(Geneid, pair_label, value, modality)
+
+        both <- bind_rows(prot, rna) %>%
+            mutate(pair_label = factor(pair_label, levels = MATCHED_STAGES$pair_label)) %>%
+            group_by(Geneid, modality) %>%
+            mutate(z = if (sd(value, na.rm = TRUE) > 0)
+                       (value - mean(value, na.rm = TRUE)) / sd(value, na.rm = TRUE)
+                   else 0) %>%
+            ungroup()
+        both
+    })
+
+    output$plot_combined <- renderPlotly({
+        df <- combined_data()
+        validate(need(nrow(df) > 0,
+                      "No matched-stage data for selection. ",
+                      "Check that the gene exists in both modalities."))
+        p <- ggplot(df, aes(x = pair_label, y = z,
+                            group = interaction(Geneid, modality),
+                            color = Geneid, linetype = modality,
+                            text = paste0("gene: ", Geneid,
+                                          "<br>modality: ", modality,
+                                          "<br>stage: ", pair_label,
+                                          "<br>z-score: ", round(z, 2),
+                                          "<br>raw value: ", round(value, 2)))) +
+            geom_line(linewidth = ln_width()) + geom_point(size = pt_size(), shape = pt_shape()) +
+            theme_minimal(base_size = 12) +
+            theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+            labs(x = NULL, y = "Z-score (within gene, within modality)",
+                 color = NULL, linetype = NULL)
+        ggplotly(apply_palette(p), tooltip = "text")
+    })
+
+    output$plot_combined_hm <- renderPlotly({
+        df <- combined_data()
+        validate(need(nrow(df) > 0, "No matched-stage data for selection."))
+        # Faceted heatmap: protein left, RNA right
+        p <- ggplot(df, aes(x = pair_label, y = Geneid, fill = z,
+                            text = paste0(Geneid,
+                                          "<br>modality: ", modality,
+                                          "<br>stage: ", pair_label,
+                                          "<br>z-score: ", round(z, 2),
+                                          "<br>raw value: ", round(value, 2)))) +
+            geom_tile(color = "white") +
+            facet_wrap(~ modality, nrow = 1) +
+            theme_minimal(base_size = 11) +
+            theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+            labs(x = NULL, y = NULL)
+        ggplotly(apply_heatmap_palette(p), tooltip = "text")
+    })
+
+    output$plot_combined_hm_raw <- renderPlotly({
+        df <- combined_data()
+        validate(need(nrow(df) > 0, "No matched-stage data for selection."))
+        # Each modality on its own color scale (different units)
+        p <- ggplot(df, aes(x = pair_label, y = Geneid, fill = value,
+                            text = paste0(Geneid,
+                                          "<br>modality: ", modality,
+                                          "<br>stage: ", pair_label,
+                                          "<br>value: ", round(value, 2)))) +
+            geom_tile(color = "white") +
+            facet_wrap(~ modality, nrow = 1, scales = "free") +
+            theme_minimal(base_size = 11) +
+            theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+            labs(x = NULL, y = NULL)
+        ggplotly(apply_heatmap_palette(p), tooltip = "text")
+    })
+
+    output$table_protein <- renderDT({
+        req(input$genes)
+        abund_raw %>%
+            filter(gene %in% input$genes) %>%
+            select(gene, Index, NumberPSM, MaxPepProb, ReferenceIntensity,
+                   matches("^Rep[AB]_")) %>%
+            datatable(
+                extensions = "Buttons",
+                options = list(pageLength = 25, scrollX = TRUE,
+                               dom = "Bfrtip", buttons = c("copy", "csv", "excel")),
+                rownames = FALSE
+            ) %>%
+            formatRound(c("ReferenceIntensity",
+                          grep("^Rep[AB]_", names(abund_raw), value = TRUE)),
+                        digits = 2)
+    })
+
+    output$table_sites <- renderDT({
+        req(input$genes)
+        sites_raw %>%
+            filter(gene %in% input$genes,
+                   confidence_tier %in% input$tiers,
+                   num_psms >= input$min_psms) %>%
+            select(gene, site_position, residue, confidence_tier,
+                   num_psms, num_peptides, best_delta_score, best_xcorr,
+                   best_expect, all_of(INT_COLS)) %>%
+            datatable(
+                extensions = "Buttons",
+                options = list(pageLength = 25, scrollX = TRUE,
+                               dom = "Bfrtip", buttons = c("copy", "csv", "excel")),
+                rownames = FALSE
+            ) %>%
+            formatRound(INT_COLS, 1) %>%
+            formatRound("best_delta_score", 3)
+    })
+}
+
+shinyApp(ui, server)
