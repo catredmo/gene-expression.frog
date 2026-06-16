@@ -84,7 +84,15 @@ names(abund_raw)[17:27] <- paste0("RepB_", STAGES)
 abund_raw$gene <- extract_gene(abund_raw$Index)
 abund_raw <- abund_raw %>%
     relocate(gene, .before = Index) %>%
-    filter(!is.na(gene) & gene != "")
+    filter(!is.na(gene) & gene != "") %>%
+    # Some gene symbols appear on >1 protein accession (a curated RefSeq plus a
+    # redundant predicted model mapping to the same gene). Keep only the
+    # best-supported row per symbol (most PSMs, ties broken by ReferenceIntensity)
+    # so each gene plots as a single trajectory instead of two overlaid lines.
+    # ~267 of ~14,240 symbols are affected; e.g. pkp3.S had a 30-PSM XP_ model
+    # and a 3-PSM NP_ model under the same label.
+    arrange(desc(NumberPSM), desc(ReferenceIntensity)) %>%
+    distinct(gene, .keep_all = TRUE)
 
 genes_all <- sort(unique(abund_raw$gene))
 
@@ -453,7 +461,15 @@ server <- function(input, output, session) {
                         em("keratin"), " tab uses Rep C against the krt12.4.S-corrected ",
                         "FASTA (only place the head-restored krt12.4.S peptides appear), ",
                         "and the ", em("all phosphosites"), " tabs use Rep A+B against ",
-                        "the standard v10.1 FASTA (broader coverage but uncorrected).")
+                        "the standard v10.1 FASTA (broader coverage but uncorrected)."),
+                tags$li(strong("Redundant protein models:"),
+                        " ~267 gene symbols in the abundance data appeared on more ",
+                        "than one protein accession (a curated RefSeq plus a redundant ",
+                        "predicted model mapping to the same gene). For each symbol the ",
+                        "app shows only the best-supported accession (most PSMs), so ",
+                        "every gene plots as a single trajectory. e.g. ",
+                        tags$code("pkp3.S"), " uses the 30-PSM ", tags$code("XP_018115036.1"),
+                        " model rather than the 3-PSM ", tags$code("NP_001084424.1"), " one.")
             ),
 
             tags$hr(),
@@ -465,7 +481,7 @@ server <- function(input, output, session) {
                           tags$code("github.com/catredmo/gene-expression.frog")),
                    ". Pull requests and issues welcome."),
 
-            tags$p(em("Last updated: 2026-06-15. Data is subject to revision as ",
+            tags$p(em("Last updated: 2026-06-16. Data is subject to revision as ",
                       "the underlying gene model corrections progress."))
         ))
     })
