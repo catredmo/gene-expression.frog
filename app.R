@@ -5,9 +5,9 @@
 #     14,540 proteins x (RepA: 11 stages, RepB: 11 stages)
 #     MSstatsTMT-normalized log2 abundances (relative to channel-median ref)
 #
-# Phosphosite data: Rep C re-search against krt12.4.S-corrected DB
-#   ../cluster_reanalysis/keratin_phospho_sites_perstage.tsv
-#     40 phosphosites (keratin only; broader phosphosite extraction TBD)
+# Phosphosite data: Rep A+B re-search against standard v10.1 DB
+#   ../cluster_reanalysis/results_phospho/ -> all_phosphosites_perstage.tsv
+#     25,574 phosphosites across the detectable proteome (delta-score localised)
 #
 # Run locally:
 #   shiny::runApp("shiny_keratin_browser")
@@ -37,7 +37,6 @@ resolve_data_file <- function(filename, dev_subpath) {
 
 ABUND_TSV       <- resolve_data_file("abundance_gene_MD.tsv",
                                      "fragpipe/tmt-report")
-SITES_TSV       <- resolve_data_file("keratin_phospho_sites_perstage.tsv", ".")
 PEPS_TSV        <- resolve_data_file("keratin_peptides_all_perstage.tsv", ".")
 ALL_PHOS_TSV    <- resolve_data_file("all_phosphosites_perstage.tsv", ".")
 RNA_DEV_TSV     <- resolve_data_file("session2016_dev_tpm.tsv", ".")
@@ -103,28 +102,18 @@ abund_long <- abund_raw %>%
                  values_to = "log2_abundance") %>%
     mutate(stage = factor(stage, levels = STAGES))
 
-# ---- Load keratin phosphosite data (Rep C) ----
-sites_raw <- read_tsv(SITES_TSV, show_col_types = FALSE)
-sites_raw <- sites_raw %>%
-    arrange(desc(best_delta_score)) %>%
-    distinct(gene, site_position, residue, .keep_all = TRUE) %>%
-    mutate(confidence_tier = case_when(
-        best_delta_score >= 0.3 ~ "high",
-        best_delta_score >= 0.1 ~ "medium",
-        TRUE ~ "low"
-    ))
-
-long_sites <- sites_raw %>%
-    mutate(label = paste0(gene, " ", residue, site_position)) %>%
-    pivot_longer(all_of(INT_COLS),
-                 names_to = "stage_col", values_to = "intensity") %>%
-    mutate(stage = factor(sub("intensity_[^_]+_", "", stage_col), levels = STAGES))
-
-phospho_genes <- sort(unique(sites_raw$gene))
-
-# ---- Load all-proteins phosphosite data (Rep A+B against standard v10.1 DB) ----
+# ---- Load phosphosite data (Rep A+B against standard v10.1 DB) ----
+# This is the single phosphosite dataset in the app. The former Rep C keratin-only
+# tab (corrected krt12.4.S DB) was retired: it contained no unique phosphosites
+# (its krt12.4.S S409 is the same residue as this dataset's S349, just in the
+# 435-aa corrected vs 375-aa standard coordinate frame), and the restored
+# krt12.4.S head is unphosphorylated, so the corrected DB exposes no new sites.
 all_phos_raw <- read_tsv(ALL_PHOS_TSV, show_col_types = FALSE)
 all_phos_raw <- all_phos_raw %>%
+    # Renumber krt12.4.S to the corrected 435-aa frame (standard +60) so its
+    # phosphosite positions match the corrected gene model used elsewhere.
+    mutate(site_position = if_else(gene == "krt12.4.S",
+                                   site_position + 60, site_position)) %>%
     arrange(desc(best_delta_score)) %>%
     distinct(gene, site_position, residue, .keep_all = TRUE) %>%
     mutate(confidence_tier = case_when(
@@ -170,7 +159,7 @@ log2_sum <- function(x) {
 ui <- fluidPage(
     tags$head(tags$title("Xenopus laevis gene expression explorer")),
     titlePanel(HTML("<em>Xenopus laevis</em> gene expression explorer")),
-    p(em("Mass spectrometry: Van Itallie 2025 reanalysis (FragPipe Rep A+B + Rep C phospho) | ",
+    p(em("Mass spectrometry: Van Itallie 2025 reanalysis (FragPipe Rep A+B) | ",
          "RNA-seq: Session et al. 2016 reanalysis (TPM, developmental + adult tissues)")),
     p(actionLink("show_docs",
                  HTML("&#x1F4D6; <strong>Data sources &amp; methods</strong> (click to expand)"),
@@ -209,13 +198,13 @@ ui <- fluidPage(
                         "and heatmaps; tables stay per-homeolog.")),
             hr(),
             h4("Phosphosite tab filters"),
-            helpText(em("Applies to both the keratin (Rep C, corrected DB) and ",
-                        "all-proteins (Rep A+B, standard DB) phosphosite tabs.")),
+            helpText(em("Applies to the Phosphosites trajectory and table tabs ",
+                        "(Rep A+B against the standard v10.1 DB).")),
             checkboxGroupInput("tiers", "Confidence tier:",
                                choices = c("high", "medium", "low"),
                                selected = c("high", "medium")),
             sliderInput("min_psms", "Minimum num_psms:",
-                        min = 1, max = max(sites_raw$num_psms), value = 1),
+                        min = 1, max = max(all_phos_raw$num_psms), value = 1),
             hr(),
             h4("Plot customization"),
             selectInput("palette", "Categorical palette (lines / bars):",
@@ -280,32 +269,22 @@ ui <- fluidPage(
                                       p("Top: row-Z-scored so temporal patterns are comparable across proteins of different absolute abundance. ",
                                         "Bottom: raw log2-normalized abundance (replicate-averaged) preserving absolute level. ",
                                         "Diverging palettes work for both; switch to a sequential palette in the sidebar for raw values if preferred.")),
-                             tabPanel("Phosphosite trajectory (keratin)",
-                                      br(),
-                                      plotlyOutput("plot_sites", height = "520px"),
-                                      br(),
-                                      p("Phosphosite TMT intensity across stages. ",
-                                        strong("Source:"), " Rep C re-search against the krt12.4.S-corrected database. ",
-                                        "Keratin-only. Filterable by confidence tier and PSM count.")),
-                             tabPanel("All phosphosites trajectory",
+                             tabPanel("Phosphosites trajectory",
                                       br(),
                                       plotlyOutput("plot_all_phos", height = "520px"),
                                       br(),
-                                      p("All-proteins phosphosite TMT intensity across stages. ",
+                                      p("Phosphosite TMT intensity across stages. ",
                                         strong("Source:"), " Rep A+B Comet search against the standard Xenbase v10.1 database. ",
                                         "25,574 unique phosphosites across the detectable proteome. ",
-                                        "Filterable by confidence tier and PSM count (same sidebar controls as the keratin tab).")),
+                                        "Filterable by confidence tier and PSM count.")),
                              tabPanel("Protein table",
                                       br(),
                                       DTOutput("table_protein")),
-                             tabPanel("Phosphosite table (keratin)",
-                                      br(),
-                                      DTOutput("table_sites")),
-                             tabPanel("All phosphosites table",
+                             tabPanel("Phosphosite table",
                                       br(),
                                       DTOutput("table_all_phos"),
                                       br(),
-                                      p(em("Rep A+B all-proteins phosphosite table. Filtered by sidebar gene selection plus the phosphosite tier and PSM filters.")))
+                                      p(em("Phosphosite table (Rep A+B). Filtered by sidebar gene selection plus the phosphosite tier and PSM filters.")))
                          )),
                 tabPanel("RNA-seq",
                          br(),
@@ -409,23 +388,20 @@ server <- function(input, output, session) {
                         "FASTA, MSstatsTMT normalisation. ",
                         "Source file: ", tags$code("abundance_gene_MD.tsv"),
                         " (14,241 proteins, two replicates, log2 normalised)."),
-                tags$li(strong("Phosphosites - keratin (Rep C): "),
-                        "Comet search against the krt12.4.S head-restored ",
-                        "corrected FASTA. FDR 1% PSM-level. Phospho positions ",
-                        "localised by delta-score (rank1 - rank2 xcorr). ",
-                        "32 unique keratin sites. ",
-                        "Use the 'Phosphosite trajectory (keratin)' tab."),
-                tags$li(strong("Phosphosites - all proteins (Rep A+B): "),
+                tags$li(strong("Phosphosites (Rep A+B): "),
                         "Comet search against the standard Xenbase v10.1 ",
                         "database. ",
                         tags$strong("25,574 unique phosphosites"),
                         " across the detectable proteome. FDR 1% PSM-level, ",
-                        "same delta-score localisation. Use the 'All phosphosites ",
-                        "trajectory' and 'All phosphosites table' tabs. ",
-                        em("Note:"), " this Rep A+B search used the ",
-                        em("uncorrected"), " standard v10.1 database, so the ",
-                        "krt12.4.S head-restored peptides won't appear here ",
-                        "(those are visible in the Rep C keratin tab only).")
+                        "phospho positions localised by delta-score ",
+                        "(rank1 - rank2 xcorr). Use the 'Phosphosites trajectory' ",
+                        "and 'Phosphosite table' tabs. ",
+                        em("Note:"), " a separate Rep C search against the ",
+                        "krt12.4.S head-restored corrected FASTA was retired - it ",
+                        "yielded no unique phosphosites (the restored head is ",
+                        "unphosphorylated). The one krt12.4.S phosphosite has been ",
+                        "renumbered to the corrected 435-aa frame (+60) here for ",
+                        "consistency with the rest of the app.")
             ),
             tags$p(strong("Key correction applied:"), " the Xenbase v10.1 ",
                    "annotation of krt12.4.S (NP_001079456.1, 375 aa) was found to ",
@@ -480,12 +456,13 @@ server <- function(input, output, session) {
                         "Nieuwkoop-Faber correspondence (Egg, St9, St12, St30, St40/41). ",
                         "Intermediate proteomics stages (St18, St22, St24, St26, St46) ",
                         "have no exact RNA-seq counterpart."),
-                tags$li(strong("Phospho data sources:"),
-                        " two distinct re-searches are available - the ",
-                        em("keratin"), " tab uses Rep C against the krt12.4.S-corrected ",
-                        "FASTA (only place the head-restored krt12.4.S peptides appear), ",
-                        "and the ", em("all phosphosites"), " tabs use Rep A+B against ",
-                        "the standard v10.1 FASTA (broader coverage but uncorrected)."),
+                tags$li(strong("Phosphosite source:"),
+                        " phosphosites come from the Rep A+B Comet search against ",
+                        "the standard v10.1 FASTA (25,574 sites). The earlier ",
+                        "Rep C keratin-only search (krt12.4.S-corrected FASTA) was ",
+                        "retired as redundant - it added no unique sites because the ",
+                        "restored krt12.4.S head is unphosphorylated. krt12.4.S ",
+                        "positions are reported in the corrected 435-aa frame."),
                 tags$li(strong("Redundant protein models:"),
                         " ~267 gene symbols in the abundance data appeared on more ",
                         "than one protein accession (a curated RefSeq plus a redundant ",
@@ -673,30 +650,6 @@ server <- function(input, output, session) {
         ggplotly(apply_heatmap_palette(p), tooltip = "text")
     })
 
-    output$plot_sites <- renderPlotly({
-        df <- long_sites %>%
-            filter(gene %in% input$genes,
-                   confidence_tier %in% input$tiers,
-                   num_psms >= input$min_psms)
-        validate(need(nrow(df) > 0,
-                      "No phosphosites for the selected genes + filters. ",
-                      "Note: phospho data are currently keratin-only (Rep C)."))
-        p <- ggplot(df, aes(x = stage, y = intensity, group = label, color = label,
-                            text = paste0(label,
-                                          "<br>tier: ", confidence_tier,
-                                          "<br>num_psms: ", num_psms,
-                                          "<br>stage: ", stage,
-                                          "<br>intensity: ",
-                                          formatC(intensity, format = "g", digits = 4)))) +
-            geom_line(alpha = 0.8, linewidth = ln_width()) +
-            geom_point(size = pt_size(), shape = pt_shape()) +
-            scale_y_log10(labels = scales::label_number(big.mark = ",")) +
-            theme_minimal(base_size = 12) +
-            theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
-            labs(x = NULL, y = "TMT intensity", color = NULL)
-        ggplotly(apply_palette(p), tooltip = "text")
-    })
-
     # ---- Plot styling helpers (driven by sidebar customization inputs) ----
     pt_shape <- reactive(as.numeric(input$point_shape))
     pt_size  <- reactive(input$point_size)
@@ -778,7 +731,7 @@ server <- function(input, output, session) {
                    confidence_tier %in% input$tiers,
                    num_psms >= input$min_psms)
         validate(need(nrow(df) > 0,
-                      "No all-proteins phosphosites for the selected genes + filters. ",
+                      "No phosphosites for the selected genes + filters. ",
                       "Try lowering the PSM cutoff or including the 'low' tier."))
         p <- ggplot(df, aes(x = stage, y = intensity, group = label, color = label,
                             text = paste0(label,
@@ -1078,24 +1031,6 @@ server <- function(input, output, session) {
             formatRound(TISSUES_RNA, digits = 2)
     })
 
-    output$table_sites <- renderDT({
-        req(input$genes)
-        sites_raw %>%
-            filter(gene %in% input$genes,
-                   confidence_tier %in% input$tiers,
-                   num_psms >= input$min_psms) %>%
-            select(gene, site_position, residue, confidence_tier,
-                   num_psms, num_peptides, best_delta_score, best_xcorr,
-                   best_expect, all_of(INT_COLS)) %>%
-            datatable(
-                extensions = "Buttons",
-                options = list(pageLength = 25, scrollX = TRUE,
-                               dom = "Bfrtip", buttons = c("copy", "csv", "excel")),
-                rownames = FALSE
-            ) %>%
-            formatRound(INT_COLS, 1) %>%
-            formatRound("best_delta_score", 3)
-    })
 }
 
 shinyApp(ui, server)
