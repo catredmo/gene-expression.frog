@@ -177,6 +177,11 @@ ui <- fluidPage(
             actionButton("preset_dsm", "Desmosome", class = "btn-sm"),
             actionButton("preset_ajc", "AJC", class = "btn-sm"),
             br(), br(),
+            textAreaInput("genes_paste", "Paste a gene list:",
+                          placeholder = "krt8.1.L, krt18.1.L, dsp.L  (comma, space, or newline separated)",
+                          rows = 2),
+            actionButton("genes_paste_add", "Add pasted genes", class = "btn-sm"),
+            br(), br(),
             radioButtons("rep_mode", "Replicate display:",
                          choices = c("Both reps overlaid" = "both",
                                      "Mean +/- range" = "mean",
@@ -513,6 +518,26 @@ server <- function(input, output, session) {
                            "ocln.L","ocln.S","afdn.L","afdn.S"))
         updateSelectizeInput(session, "genes", selected = ajc,
                              choices = genes_union, server = TRUE)
+    })
+    observeEvent(input$genes_paste_add, {
+        req(input$genes_paste)
+        # Split on commas, semicolons, or any whitespace (incl. newlines/tabs).
+        toks <- trimws(strsplit(input$genes_paste, "[,;[:space:]]+")[[1]])
+        toks <- toks[toks != ""]
+        req(length(toks) > 0)
+        # Case-insensitive match so e.g. "KRT8.1.L" resolves to "krt8.1.L".
+        matched <- genes_union[tolower(genes_union) %in% tolower(toks)]
+        unmatched <- toks[!tolower(toks) %in% tolower(genes_union)]
+        # Append to the current selection rather than replacing it.
+        sel <- union(input$genes, matched)
+        updateSelectizeInput(session, "genes", selected = sel,
+                             choices = genes_union, server = TRUE)
+        if (length(unmatched) > 0) {
+            showNotification(
+                paste0("Not found (", length(unmatched), "): ",
+                       paste(unmatched, collapse = ", ")),
+                type = "warning", duration = 8)
+        }
     })
 
     sel <- reactive({
