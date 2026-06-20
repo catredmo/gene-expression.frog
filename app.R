@@ -276,7 +276,9 @@ ui <- fluidPage(
                                       p("Phosphosite TMT intensity across stages. ",
                                         strong("Source:"), " Rep A+B Comet search against the standard Xenbase v10.1 database. ",
                                         "25,574 unique phosphosites across the detectable proteome. ",
-                                        "Filterable by confidence tier and PSM count.")),
+                                        "Filterable by confidence tier and PSM count. ",
+                                        em("Hover a point for the AScore site-localization and the peptide motif "),
+                                        em("(the modified residue is lower-case; see the table for full details)."))),
                              tabPanel("Protein table",
                                       br(),
                                       DTOutput("table_protein")),
@@ -284,7 +286,11 @@ ui <- fluidPage(
                                       br(),
                                       DTOutput("table_all_phos"),
                                       br(),
-                                      p(em("Phosphosite table (Rep A+B). Filtered by sidebar gene selection plus the phosphosite tier and PSM filters.")))
+                                      p(em("Phosphosite table (Rep A+B). Filtered by sidebar gene selection plus the phosphosite tier and PSM filters. "),
+                                        em("'motif (+/-7)' shows the sequence window with the phosphoresidue in lower-case; "),
+                                        em("'candidate S/T/Y' is how many residues in the detected peptide could carry the phosphate; "),
+                                        em("'AScore'/'localization' give the site-localization confidence (confident >=19, likely 13-19, ambiguous <13). "),
+                                        em("Sites without AScore show 'not assessed'.")))
                          )),
                 tabPanel("RNA-seq",
                          br(),
@@ -401,7 +407,20 @@ server <- function(input, output, session) {
                         "yielded no unique phosphosites (the restored head is ",
                         "unphosphorylated). The one krt12.4.S phosphosite has been ",
                         "renumbered to the corrected 435-aa frame (+60) here for ",
-                        "consistency with the rest of the app.")
+                        "consistency with the rest of the app."),
+                tags$li(strong("Site localization (AScore): "),
+                        "phosphosites are annotated with ", em("AScore"),
+                        " site-localization where available (", tags$code("ascore"),
+                        ", ", tags$code("loc_tier"), ": confident >=19 ~p<0.01, ",
+                        "likely 13-19 ~p<0.05, ambiguous <13), plus the number of ",
+                        "candidate S/T/Y in the detected peptide and a +/-7 sequence ",
+                        "motif (phosphoresidue lower-case). ",
+                        tags$strong("Coverage caveat:"), " AScore was run on a ",
+                        "subset of phospho-PSMs, so ~24% of sites (6,025) carry a ",
+                        "localization score; the rest show 'not assessed'. Many sites ",
+                        "- especially in the serine-rich keratin head/tail domains - ",
+                        "are genuinely ", em("ambiguous"), ": the phosphate cannot be ",
+                        "pinned to a single residue among several adjacent S/T.")
             ),
             tags$p(strong("Key correction applied:"), " the Xenbase v10.1 ",
                    "annotation of krt12.4.S (NP_001079456.1, 375 aa) was found to ",
@@ -729,7 +748,12 @@ server <- function(input, output, session) {
         df <- all_phos_long %>%
             filter(gene %in% input$genes,
                    confidence_tier %in% input$tiers,
-                   num_psms >= input$min_psms)
+                   num_psms >= input$min_psms) %>%
+            mutate(loc_display = if_else(
+                       is.na(ascore), "not assessed",
+                       paste0(loc_tier, " (AScore ", round(ascore, 1), ", ",
+                              n_candidate_sites, " candidate S/T/Y in peptide)")),
+                   motif_display = if_else(is.na(peptide_motif), "n/a", peptide_motif))
         validate(need(nrow(df) > 0,
                       "No phosphosites for the selected genes + filters. ",
                       "Try lowering the PSM cutoff or including the 'low' tier."))
@@ -737,6 +761,8 @@ server <- function(input, output, session) {
                             text = paste0(label,
                                           "<br>tier: ", confidence_tier,
                                           "<br>num_psms: ", num_psms,
+                                          "<br>localization: ", loc_display,
+                                          "<br>peptide motif: ", motif_display,
                                           "<br>stage: ", stage,
                                           "<br>intensity: ",
                                           formatC(intensity, format = "g", digits = 4)))) +
@@ -755,14 +781,20 @@ server <- function(input, output, session) {
             filter(gene %in% input$genes,
                    confidence_tier %in% input$tiers,
                    num_psms >= input$min_psms) %>%
-            select(gene, site_position, residue, confidence_tier,
-                   num_psms, num_peptides, best_delta_score,
+            mutate(localization = coalesce(loc_tier, "not assessed"),
+                   peptide_motif = coalesce(peptide_motif, "n/a")) %>%
+            select(gene, site_position, residue, peptide_motif,
+                   n_candidate_sites, ascore, localization,
+                   confidence_tier, num_psms, num_peptides, best_delta_score,
                    all_of(INT_COLS), protein) %>%
             datatable(
                 extensions = "Buttons",
                 options = list(pageLength = 25, scrollX = TRUE,
                                dom = "Bfrtip", buttons = c("copy", "csv", "excel")),
-                rownames = FALSE
+                rownames = FALSE,
+                colnames = c("AScore" = "ascore",
+                             "candidate S/T/Y" = "n_candidate_sites",
+                             "motif (+/-7)" = "peptide_motif")
             ) %>%
             formatRound(INT_COLS, 1) %>%
             formatRound("best_delta_score", 3)
