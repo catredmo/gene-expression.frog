@@ -624,7 +624,12 @@ server <- function(input, output, session) {
             scale_fill_viridis_d(option = opt)
     }
 
-    apply_heatmap_palette <- function(p) {
+    # Z-scored heatmaps use the defaults (legend "z-score", diverging about 0).
+    # Raw-value heatmaps pass their own legend label and a midpoint centred on the
+    # data range so the diverging palette keeps its contrast (raw values sit
+    # entirely on one side of 0). Helper centres on the value range:
+    mid_of <- function(x) mean(range(x, na.rm = TRUE))
+    apply_heatmap_palette <- function(p, name = "z-score", midpoint = 0) {
         pal <- input$heatmap_palette
         if (is.null(pal)) pal <- "RdBu"
         diverging_endpoints <- list(
@@ -635,8 +640,8 @@ server <- function(input, output, session) {
         if (pal %in% names(diverging_endpoints)) {
             ep <- diverging_endpoints[[pal]]
             return(p + scale_fill_gradient2(low = ep["low"], mid = ep["mid"],
-                                            high = ep["high"], midpoint = 0,
-                                            name = "z-score"))
+                                            high = ep["high"], midpoint = midpoint,
+                                            name = name))
         }
         opt <- switch(pal,
                       "viridis" = "viridis",
@@ -644,7 +649,7 @@ server <- function(input, output, session) {
                       "plasma" = "plasma",
                       "cividis" = "cividis",
                       "viridis")
-        p + scale_fill_viridis_c(option = opt, name = "z-score")
+        p + scale_fill_viridis_c(option = opt, name = name)
     }
 
     zscore_by_group <- function(df, group_col, value_col) {
@@ -671,7 +676,9 @@ server <- function(input, output, session) {
             theme_minimal(base_size = 11) +
             theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
             labs(x = NULL, y = NULL)
-        ggplotly(apply_heatmap_palette(p), tooltip = "text")
+        ggplotly(apply_heatmap_palette(p, name = "log2 abundance",
+                                       midpoint = mid_of(mat$mean_abund)),
+                 tooltip = "text")
     })
 
     output$plot_all_phos <- renderPlotly({
@@ -769,7 +776,9 @@ server <- function(input, output, session) {
             theme_minimal(base_size = 11) +
             theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
             labs(x = NULL, y = NULL)
-        ggplotly(apply_heatmap_palette(p), tooltip = "text")
+        ggplotly(apply_heatmap_palette(p, name = "log10(TPM+1)",
+                                       midpoint = mid_of(df$log10_tpm)),
+                 tooltip = "text")
     })
 
     output$plot_rna_tissue <- renderPlotly({
@@ -821,7 +830,9 @@ server <- function(input, output, session) {
             theme_minimal(base_size = 11) +
             theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
             labs(x = NULL, y = NULL)
-        ggplotly(apply_heatmap_palette(p), tooltip = "text")
+        ggplotly(apply_heatmap_palette(p, name = "log10(TPM+1)",
+                                       midpoint = mid_of(df$log10_tpm)),
+                 tooltip = "text")
     })
 
     # ---- Combined matched-stages view ----
@@ -932,7 +943,9 @@ server <- function(input, output, session) {
             theme_minimal(base_size = 11) +
             theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
             labs(x = NULL, y = NULL)
-        ggplotly(apply_heatmap_palette(p), tooltip = "text")
+        ggplotly(apply_heatmap_palette(p, name = "raw value",
+                                       midpoint = mid_of(df$value)),
+                 tooltip = "text")
     })
 
     output$table_protein <- renderDT({
