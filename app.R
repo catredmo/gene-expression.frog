@@ -155,6 +155,17 @@ rna_genes <- unique(c(rna_dev$Geneid, rna_tissue$Geneid))
 all_phos_genes <- unique(all_phos_raw$gene)
 genes_union <- sort(unique(c(genes_all, rna_genes, all_phos_genes)))
 
+# ---- Homeolog merging helpers ----
+# X. laevis genes carry a .L / .S subgenome suffix. Stripping it gives the base
+# symbol so a homeolog pair (e.g. krt8.1.L + krt8.1.S) can be collapsed to one.
+homeolog_base <- function(g) sub("[.][LS]$", "", g)
+# Combine MSstatsTMT log2 abundances by summing in linear space (total protein
+# output), returning to log2. NA if every homeolog is missing in the group.
+log2_sum <- function(x) {
+    x <- x[!is.na(x)]
+    if (length(x) == 0) NA_real_ else log2(sum(2^x))
+}
+
 # ---- UI ----
 ui <- fluidPage(
     tags$head(tags$title("Xenopus laevis gene expression explorer")),
@@ -188,6 +199,14 @@ ui <- fluidPage(
                                      "RepA only" = "RepA",
                                      "RepB only" = "RepB"),
                          selected = "both"),
+            radioButtons("homeolog_mode", "Homeologs (.L / .S):",
+                         choices = c("Show both homeologs" = "both",
+                                     "Merge (sum .L + .S)" = "merge"),
+                         selected = "both"),
+            helpText(em("Merge collapses each .L/.S pair to its base symbol, ",
+                        "summing both subgenomes (total gene output). Pulls both ",
+                        "homeologs even if only one is selected. Applies to plots ",
+                        "and heatmaps; tables stay per-homeolog.")),
             hr(),
             h4("Phosphosite tab filters"),
             helpText(em("Applies to both the keratin (Rep C, corrected DB) and ",
@@ -474,7 +493,15 @@ server <- function(input, output, session) {
                         "app shows only the best-supported accession (most PSMs), so ",
                         "every gene plots as a single trajectory. e.g. ",
                         tags$code("pkp3.S"), " uses the 30-PSM ", tags$code("XP_018115036.1"),
-                        " model rather than the 3-PSM ", tags$code("NP_001084424.1"), " one.")
+                        " model rather than the 3-PSM ", tags$code("NP_001084424.1"), " one."),
+                tags$li(strong("Homeolog merging:"),
+                        " the sidebar 'Merge (sum .L + .S)' option collapses each ",
+                        "homeolog pair to its base symbol, summing the two subgenomes ",
+                        "in linear space (protein: ", tags$code("log2(2^L + 2^S)"),
+                        "; RNA: summed TPM) to represent total gene output. It pulls ",
+                        "both homeologs from the full data even if only one is selected, ",
+                        "and applies to the plots and heatmaps only - the data tables ",
+                        "always stay per-homeolog.")
             ),
 
             tags$hr(),
@@ -542,7 +569,45 @@ server <- function(input, output, session) {
 
     sel <- reactive({
         req(input$genes)
-        abund_long %>% filter(gene %in% input$genes)
+        if (input$homeolog_mode == "merge") {
+            bases <- unique(homeolog_base(input$genes))
+            abund_long %>%
+                mutate(gene = homeolog_base(gene)) %>%
+                filter(gene %in% bases) %>%
+                group_by(gene, rep, stage) %>%
+                summarise(log2_abundance = log2_sum(log2_abundance),
+                          .groups = "drop")
+        } else {
+            abund_long %>% filter(gene %in% input$genes)
+        }
+    })
+
+    # RNA-seq selection reactives, homeolog-aware (sum TPM across .L + .S).
+    rna_dev_sel <- reactive({
+        req(input$genes)
+        if (input$homeolog_mode == "merge") {
+            bases <- unique(homeolog_base(input$genes))
+            rna_dev_long %>%
+                mutate(Geneid = homeolog_base(Geneid)) %>%
+                filter(Geneid %in% bases) %>%
+                group_by(Geneid, stage) %>%
+                summarise(tpm = sum(tpm, na.rm = TRUE), .groups = "drop")
+        } else {
+            rna_dev_long %>% filter(Geneid %in% input$genes)
+        }
+    })
+    rna_tissue_sel <- reactive({
+        req(input$genes)
+        if (input$homeolog_mode == "merge") {
+            bases <- unique(homeolog_base(input$genes))
+            rna_tissue_long %>%
+                mutate(Geneid = homeolog_base(Geneid)) %>%
+                filter(Geneid %in% bases) %>%
+                group_by(Geneid, tissue) %>%
+                summarise(tpm = sum(tpm, na.rm = TRUE), .groups = "drop")
+        } else {
+            rna_tissue_long %>% filter(Geneid %in% input$genes)
+        }
     })
 
     output$plot_protein <- renderPlotly({
@@ -752,7 +817,7 @@ server <- function(input, output, session) {
 
     output$plot_rna_dev <- renderPlotly({
         req(input$genes)
-        df <- rna_dev_long %>% filter(Geneid %in% input$genes)
+        df <- rna_dev_sel()
         validate(need(nrow(df) > 0,
                       "No Session 2016 developmental RNA-seq for the selected gene(s). ",
                       "(Nomenclature mismatch? krt8.L (protein) -> krt8.1.L (RNA), etc.)"))
@@ -770,8 +835,7 @@ server <- function(input, output, session) {
 
     output$plot_rna_dev_hm <- renderPlotly({
         req(input$genes)
-        df <- rna_dev_long %>%
-            filter(Geneid %in% input$genes) %>%
+        df <- rna_dev_sel() %>%
             zscore_by_group("Geneid", "tpm")
         validate(need(nrow(df) > 0, "No Session 2016 dev RNA-seq for selection."))
         p <- ggplot(df, aes(x = stage, y = Geneid, fill = z,
@@ -788,8 +852,7 @@ server <- function(input, output, session) {
 
     output$plot_rna_dev_hm_raw <- renderPlotly({
         req(input$genes)
-        df <- rna_dev_long %>%
-            filter(Geneid %in% input$genes) %>%
+        df <- rna_dev_sel() %>%
             mutate(log10_tpm = log10(tpm + 1))
         validate(need(nrow(df) > 0, "No Session 2016 dev RNA-seq for selection."))
         p <- ggplot(df, aes(x = stage, y = Geneid, fill = log10_tpm,
@@ -808,7 +871,7 @@ server <- function(input, output, session) {
 
     output$plot_rna_tissue <- renderPlotly({
         req(input$genes)
-        df <- rna_tissue_long %>% filter(Geneid %in% input$genes)
+        df <- rna_tissue_sel()
         validate(need(nrow(df) > 0,
                       "No Session 2016 adult-tissue RNA-seq for the selected gene(s)."))
         p <- ggplot(df, aes(x = tissue, y = tpm, fill = Geneid,
@@ -824,8 +887,7 @@ server <- function(input, output, session) {
 
     output$plot_rna_tissue_hm <- renderPlotly({
         req(input$genes)
-        df <- rna_tissue_long %>%
-            filter(Geneid %in% input$genes) %>%
+        df <- rna_tissue_sel() %>%
             zscore_by_group("Geneid", "tpm")
         validate(need(nrow(df) > 0, "No Session 2016 tissue RNA-seq for selection."))
         p <- ggplot(df, aes(x = tissue, y = Geneid, fill = z,
@@ -842,8 +904,7 @@ server <- function(input, output, session) {
 
     output$plot_rna_tissue_hm_raw <- renderPlotly({
         req(input$genes)
-        df <- rna_tissue_long %>%
-            filter(Geneid %in% input$genes) %>%
+        df <- rna_tissue_sel() %>%
             mutate(log10_tpm = log10(tpm + 1))
         validate(need(nrow(df) > 0, "No Session 2016 tissue RNA-seq for selection."))
         p <- ggplot(df, aes(x = tissue, y = Geneid, fill = log10_tpm,
@@ -863,10 +924,10 @@ server <- function(input, output, session) {
     # ---- Combined matched-stages view ----
     combined_data <- reactive({
         req(input$genes)
-        # Protein: average over RepA/RepB, restrict to matched proteomics stages
-        prot <- abund_long %>%
-            filter(gene %in% input$genes,
-                   as.character(stage) %in% MATCHED_STAGES$prot_stage) %>%
+        # Protein: average over RepA/RepB, restrict to matched proteomics stages.
+        # sel() / rna_dev_sel() already apply the homeolog merge toggle.
+        prot <- sel() %>%
+            filter(as.character(stage) %in% MATCHED_STAGES$prot_stage) %>%
             group_by(gene, stage) %>%
             summarise(value = mean(log2_abundance, na.rm = TRUE), .groups = "drop") %>%
             rename(Geneid = gene) %>%
@@ -877,9 +938,8 @@ server <- function(input, output, session) {
             select(Geneid, pair_label, value, modality)
 
         # RNA: log10(TPM+1), restrict to matched RNA stages
-        rna <- rna_dev_long %>%
-            filter(Geneid %in% input$genes,
-                   as.character(stage) %in% MATCHED_STAGES$rna_stage) %>%
+        rna <- rna_dev_sel() %>%
+            filter(as.character(stage) %in% MATCHED_STAGES$rna_stage) %>%
             mutate(value = log10(tpm + 1)) %>%
             left_join(MATCHED_STAGES %>%
                           mutate(stage = factor(rna_stage, levels = DEV_STAGES_RNA)),
