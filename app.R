@@ -19,6 +19,10 @@ library(ggplot2)
 library(plotly)
 library(DT)
 library(readr)
+# Cross-species alignment tab dependencies
+library(Biostrings)
+library(msa)
+library(ggnewscale)
 
 # ---- File locations ----
 # The app supports two layouts:
@@ -155,10 +159,16 @@ log2_sum <- function(x) {
     if (length(x) == 0) NA_real_ else log2(sum(2^x))
 }
 
+# ---- Cross-species alignment tab (defines alignment_tab_ui / alignment_tab_server) ----
+source("alignment_tab.R", local = FALSE)
+
 # ---- UI ----
 ui <- fluidPage(
     tags$head(tags$title("Xenopus laevis gene expression explorer")),
     titlePanel(HTML("<em>Xenopus laevis</em> gene expression explorer")),
+    tabsetPanel(
+      id = "top_tabs",
+      tabPanel("Gene expression",
     p(em("Mass spectrometry: Van Itallie 2025 reanalysis (FragPipe Rep A+B) | ",
          "RNA-seq: Session et al. 2016 reanalysis (TPM, developmental + adult tissues)")),
     p(actionLink("show_docs",
@@ -363,10 +373,16 @@ ui <- fluidPage(
             )
         )
     )
+    ),
+    tabPanel("Cross-species alignment", alignment_tab_ui)
+    )
 )
 
 # ---- Server ----
 server <- function(input, output, session) {
+
+    # ---- Cross-species alignment tab ----
+    alignment_tab_server(input, output, session)
 
     # ---- Documentation modal ----
     observeEvent(input$show_docs, {
