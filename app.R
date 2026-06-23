@@ -13,16 +13,18 @@
 #   shiny::runApp("shiny_keratin_browser")
 
 library(shiny)
+# Bioconductor deps for the alignment tab are loaded BEFORE the tidyverse so
+# that dplyr's verbs (rename/filter/select/desc/slice/...) are not masked by
+# S4Vectors/IRanges. Order matters here.
+library(Biostrings)
+library(msa)
+library(ggnewscale)
 library(dplyr)
 library(tidyr)
 library(ggplot2)
 library(plotly)
 library(DT)
 library(readr)
-# Cross-species alignment tab dependencies
-library(Biostrings)
-library(msa)
-library(ggnewscale)
 
 # ---- File locations ----
 # The app supports two layouts:
@@ -159,6 +161,13 @@ log2_sum <- function(x) {
     if (length(x) == 0) NA_real_ else log2(sum(2^x))
 }
 
+# Named-colour choices for per-gene curve colouring (visually distinct first,
+# then extra shades so users can give a pathway/subgroup similar hues).
+CURVE_COLORS <- c("royalblue", "red", "forestgreen", "darkorange", "purple",
+                  "turquoise", "brown", "deeppink", "gold", "grey40",
+                  "steelblue", "firebrick", "seagreen", "orange", "mediumorchid",
+                  "navy", "red3", "limegreen", "salmon", "magenta", "black")
+
 # ---- Cross-species alignment tab (defines alignment_tab_ui / alignment_tab_server) ----
 source("alignment_tab.R", local = FALSE)
 
@@ -167,7 +176,7 @@ ui <- fluidPage(
     tags$head(tags$title("Xenopus laevis gene expression explorer")),
     titlePanel(HTML("<em>Xenopus laevis</em> gene expression explorer")),
     tabsetPanel(
-      id = "top_tabs",
+      id = "main_tabs",
       tabPanel("Gene expression",
     p(em("Mass spectrometry: Van Itallie 2025 reanalysis (FragPipe Rep A+B) | ",
          "RNA-seq: Session et al. 2016 reanalysis (TPM, developmental + adult tissues)")),
@@ -226,6 +235,12 @@ ui <- fluidPage(
                                     "Viridis (discrete)" = "viridis",
                                     "Plasma (discrete)" = "plasma"),
                         selected = "default"),
+            checkboxInput("custom_gene_colors",
+                          "Custom colours per gene (lines / bars)", FALSE),
+            conditionalPanel("input.custom_gene_colors == true",
+                             helpText(em("Assign each gene a colour - give pathway/",
+                                         "subgroup members similar hues.")),
+                             uiOutput("gene_color_ui")),
             selectInput("point_shape", "Point shape:",
                         choices = c("Filled circle" = "16",
                                     "Open circle" = "1",
@@ -251,7 +266,19 @@ ui <- fluidPage(
                                     "Magma" = "magma",
                                     "Plasma" = "plasma",
                                     "Cividis" = "cividis"),
-                        selected = "RdBu")
+                        selected = "RdBu"),
+            hr(),
+            h4("Download figure"),
+            selectInput("dl_format", "Format:",
+                        c("PDF (vector)" = "pdf", "PNG (raster)" = "png")),
+            fluidRow(
+                column(6, numericInput("dl_width", "Width (in):", 8, min = 2, max = 24, step = 0.5)),
+                column(6, numericInput("dl_height", "Height (in):", 5, min = 2, max = 24, step = 0.5))),
+            conditionalPanel("input.dl_format == 'png'",
+                             numericInput("dl_dpi", "PNG resolution (dpi):", 150,
+                                          min = 72, max = 600, step = 10)),
+            helpText(em("Settings apply to the download button under each plot ",
+                        "(both tabs). PDF/SVG are vector, publication-ready."))
         ),
         mainPanel(
             width = 9,
@@ -264,6 +291,7 @@ ui <- fluidPage(
                              tabPanel("Protein abundance",
                                       br(),
                                       plotlyOutput("plot_protein", height = "520px"),
+                                      downloadButton("dl_plot_protein", "Download figure", class = "btn-sm"),
                                       br(),
                                       p("Log2 normalized abundance per developmental stage. ",
                                         "Two TMT 11-plex replicates (RepA, RepB) overlaid by default. ",
@@ -272,9 +300,11 @@ ui <- fluidPage(
                                       br(),
                                       h4("Z-scored (within gene, across stages)"),
                                       plotlyOutput("plot_protein_hm", height = "500px"),
+                                      downloadButton("dl_plot_protein_hm", "Download figure", class = "btn-sm"),
                                       br(),
                                       h4("Raw log2 abundance (MSstatsTMT-normalized)"),
                                       plotlyOutput("plot_protein_hm_raw", height = "500px"),
+                                      downloadButton("dl_plot_protein_hm_raw", "Download figure", class = "btn-sm"),
                                       br(),
                                       p("Top: row-Z-scored so temporal patterns are comparable across proteins of different absolute abundance. ",
                                         "Bottom: raw log2-normalized abundance (replicate-averaged) preserving absolute level. ",
@@ -282,6 +312,7 @@ ui <- fluidPage(
                              tabPanel("Phosphosites trajectory",
                                       br(),
                                       plotlyOutput("plot_all_phos", height = "520px"),
+                                      downloadButton("dl_plot_all_phos", "Download figure", class = "btn-sm"),
                                       br(),
                                       p("Phosphosite TMT intensity across stages. ",
                                         strong("Source:"), " Rep A+B Comet search against the standard Xenbase v10.1 database. ",
@@ -309,12 +340,15 @@ ui <- fluidPage(
                              tabPanel("Developmental time course",
                                       br(),
                                       plotlyOutput("plot_rna_dev", height = "420px"),
+                                      downloadButton("dl_plot_rna_dev", "Download figure", class = "btn-sm"),
                                       br(),
                                       h4("Z-scored (within gene, across stages)"),
                                       plotlyOutput("plot_rna_dev_hm", height = "340px"),
+                                      downloadButton("dl_plot_rna_dev_hm", "Download figure", class = "btn-sm"),
                                       br(),
                                       h4("Raw log10(TPM+1)"),
                                       plotlyOutput("plot_rna_dev_hm_raw", height = "340px"),
+                                      downloadButton("dl_plot_rna_dev_hm_raw", "Download figure", class = "btn-sm"),
                                       br(),
                                       p("Top: line plot of log10(TPM+1) across stages. ",
                                         "Middle: row-Z-scored heatmap so temporal shape is ",
@@ -324,12 +358,15 @@ ui <- fluidPage(
                              tabPanel("Adult tissues",
                                       br(),
                                       plotlyOutput("plot_rna_tissue", height = "420px"),
+                                      downloadButton("dl_plot_rna_tissue", "Download figure", class = "btn-sm"),
                                       br(),
                                       h4("Z-scored (within gene, across tissues)"),
                                       plotlyOutput("plot_rna_tissue_hm", height = "340px"),
+                                      downloadButton("dl_plot_rna_tissue_hm", "Download figure", class = "btn-sm"),
                                       br(),
                                       h4("Raw log10(TPM+1)"),
                                       plotlyOutput("plot_rna_tissue_hm_raw", height = "340px"),
+                                      downloadButton("dl_plot_rna_tissue_hm_raw", "Download figure", class = "btn-sm"),
                                       br(),
                                       p("Top: bar chart of raw TPM. ",
                                         "Middle: Z-scored tissue specificity. ",
@@ -359,12 +396,15 @@ ui <- fluidPage(
                            "so trajectory shape is comparable but absolute level is not."),
                          br(),
                          plotlyOutput("plot_combined", height = "520px"),
+                         downloadButton("dl_plot_combined", "Download figure", class = "btn-sm"),
                          br(),
                          h4("Z-scored (within gene, within modality)"),
                          plotlyOutput("plot_combined_hm", height = "360px"),
+                         downloadButton("dl_plot_combined_hm", "Download figure", class = "btn-sm"),
                          br(),
                          h4("Raw values (protein: log2 abundance; RNA: log10 TPM+1)"),
                          plotlyOutput("plot_combined_hm_raw", height = "360px"),
+                         downloadButton("dl_plot_combined_hm_raw", "Download figure", class = "btn-sm"),
                          br(),
                          p("Top: paired line plot (solid = protein log2 abundance, ",
                            "dashed = RNA log10 TPM, both Z-scored per gene). ",
@@ -381,8 +421,47 @@ ui <- fluidPage(
 # ---- Server ----
 server <- function(input, output, session) {
 
+    # ---- Figure download support (shared by both tabs) ----
+    # pl() captures the styled ggplot for `id` before handing it to plotly, so a
+    # download handler can re-render it to a vector/raster file on demand.
+    figs <- reactiveValues()
+    pl <- function(id, g, ...) { figs[[id]] <- g; ggplotly(g, ...) }
+    # ggsave picks robust devices: PDF -> base grDevices::pdf (vector, no cairo),
+    # PNG -> ragg/grDevices. Avoids the cairo/X11 dependency that base svg() needs.
+    # A subtle source caption is added to downloads only (not the interactive view).
+    save_fig <- function(file, g, fmt, w, h, dpi) {
+        g <- g +
+            labs(caption = "Generated by Xenopus laevis gene expression explorer") +
+            theme(plot.caption = element_text(size = 7, colour = "grey55",
+                                              face = "italic", hjust = 1))
+        ggplot2::ggsave(file, plot = g, device = fmt,
+                        width = w, height = h, units = "in", dpi = dpi, limitsize = FALSE)
+    }
+    dl_ids <- c("plot_protein", "plot_protein_hm", "plot_protein_hm_raw", "plot_all_phos",
+                "plot_rna_dev", "plot_rna_dev_hm", "plot_rna_dev_hm_raw",
+                "plot_rna_tissue", "plot_rna_tissue_hm", "plot_rna_tissue_hm_raw",
+                "plot_combined", "plot_combined_hm", "plot_combined_hm_raw",
+                "cons_plot", "aln_plot")
+    for (i in dl_ids) local({
+        id <- i
+        output[[paste0("dl_", id)]] <- downloadHandler(
+            filename = function() paste0(id, ".", input$dl_format),
+            content = function(file) {
+                g <- figs[[id]]
+                validate(need(!is.null(g),
+                              "Open this plot's tab first, then download."))
+                dpi <- if (is.null(input$dl_dpi)) 150 else input$dl_dpi
+                # Some plots (e.g. the wrapped alignment) register a content-derived
+                # size so they don't get squished by the fixed sidebar dimensions.
+                d <- figs[[paste0("__dim_", id)]]
+                w <- if (is.null(d)) input$dl_width else d[["w"]]
+                h <- if (is.null(d)) input$dl_height else d[["h"]]
+                save_fig(file, g, input$dl_format, w, h, dpi)
+            })
+    })
+
     # ---- Cross-species alignment tab ----
-    alignment_tab_server(input, output, session)
+    alignment_tab_server(input, output, session, figs)
 
     # ---- Documentation modal ----
     observeEvent(input$show_docs, {
@@ -658,7 +737,7 @@ server <- function(input, output, session) {
             theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
             labs(x = NULL, y = "log2 abundance (MSstatsTMT-normalized)",
                  color = NULL, linetype = NULL)
-        ggplotly(apply_palette(p), tooltip = "text")
+        pl("plot_protein", apply_palette(p, gene_colors()), tooltip = "text")
     })
 
     output$plot_protein_hm <- renderPlotly({
@@ -682,7 +761,7 @@ server <- function(input, output, session) {
             theme_minimal(base_size = 11) +
             theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
             labs(x = NULL, y = NULL)
-        ggplotly(apply_heatmap_palette(p), tooltip = "text")
+        pl("plot_protein_hm", apply_heatmap_palette(p), tooltip = "text")
     })
 
     # ---- Plot styling helpers (driven by sidebar customization inputs) ----
@@ -690,7 +769,48 @@ server <- function(input, output, session) {
     pt_size  <- reactive(input$point_size)
     ln_width <- reactive(input$line_width)
 
-    apply_palette <- function(p) {
+    # Per-gene colours chosen by the user (named vector gene -> colour), or NULL.
+    # Keyed by both the raw symbol and its homeolog base so it matches whether or
+    # not homeolog-merge is on.
+    gene_colors <- reactive({
+        if (!isTRUE(input$custom_gene_colors)) return(NULL)
+        gs <- input$genes
+        if (is.null(gs) || !length(gs)) return(NULL)
+        cols <- vapply(seq_along(gs), function(i) {
+            v <- input[[paste0("gcol_", gs[i])]]
+            if (is.null(v) || !nzchar(v))
+                CURVE_COLORS[((i - 1) %% length(CURVE_COLORS)) + 1] else v
+        }, character(1))
+        nm <- c(gs, homeolog_base(gs)); cv <- c(cols, cols)
+        keep <- !duplicated(nm)
+        setNames(cv[keep], nm[keep])
+    })
+
+    output$gene_color_ui <- renderUI({
+        gs <- input$genes
+        if (is.null(gs) || !length(gs))
+            return(helpText("Select gene(s) to assign colours."))
+        lapply(seq_along(gs), function(i) {
+            id <- paste0("gcol_", gs[i]); cur <- isolate(input[[id]])
+            sel <- if (!is.null(cur) && nzchar(cur)) cur
+                   else CURVE_COLORS[((i - 1) %% length(CURVE_COLORS)) + 1]
+            selectInput(id, gs[i], choices = CURVE_COLORS, selected = sel)
+        })
+    })
+
+    # Does the plot use a given aesthetic in its base or any layer mapping?
+    uses_aes <- function(p, a) {
+        ms <- c(list(p$mapping), lapply(p$layers, function(l) l$mapping))
+        any(vapply(ms, function(m) any(a %in% names(m)), logical(1)))
+    }
+    apply_palette <- function(p, manual = NULL) {
+        if (!is.null(manual)) {
+            if (uses_aes(p, c("colour", "color")))
+                p <- p + scale_color_manual(values = manual, na.value = "grey50")
+            if (uses_aes(p, "fill"))
+                p <- p + scale_fill_manual(values = manual, na.value = "grey50")
+            return(p)
+        }
         pal <- input$palette
         if (is.null(pal) || pal == "default") return(p)
         if (pal %in% c("Set1", "Set2", "Dark2", "Paired")) {
@@ -754,7 +874,7 @@ server <- function(input, output, session) {
             theme_minimal(base_size = 11) +
             theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
             labs(x = NULL, y = NULL)
-        ggplotly(apply_heatmap_palette(p, name = "log2 abundance",
+        pl("plot_protein_hm_raw", apply_heatmap_palette(p, name = "log2 abundance",
                                        midpoint = mid_of(mat$mean_abund)),
                  tooltip = "text")
     })
@@ -788,7 +908,7 @@ server <- function(input, output, session) {
             theme_minimal(base_size = 12) +
             theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
             labs(x = NULL, y = "TMT intensity", color = NULL)
-        ggplotly(apply_palette(p), tooltip = "text")
+        pl("plot_all_phos", apply_palette(p), tooltip = "text")
     })
 
     output$table_all_phos <- renderDT({
@@ -831,7 +951,7 @@ server <- function(input, output, session) {
             theme_minimal(base_size = 12) +
             theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
             labs(x = NULL, y = "TPM + 1 (log10)", color = NULL)
-        ggplotly(apply_palette(p), tooltip = "text")
+        pl("plot_rna_dev", apply_palette(p, gene_colors()), tooltip = "text")
     })
 
     output$plot_rna_dev_hm <- renderPlotly({
@@ -848,7 +968,7 @@ server <- function(input, output, session) {
             theme_minimal(base_size = 11) +
             theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
             labs(x = NULL, y = NULL)
-        ggplotly(apply_heatmap_palette(p), tooltip = "text")
+        pl("plot_rna_dev_hm", apply_heatmap_palette(p), tooltip = "text")
     })
 
     output$plot_rna_dev_hm_raw <- renderPlotly({
@@ -865,7 +985,7 @@ server <- function(input, output, session) {
             theme_minimal(base_size = 11) +
             theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
             labs(x = NULL, y = NULL)
-        ggplotly(apply_heatmap_palette(p, name = "log10(TPM+1)",
+        pl("plot_rna_dev_hm_raw", apply_heatmap_palette(p, name = "log10(TPM+1)",
                                        midpoint = mid_of(df$log10_tpm)),
                  tooltip = "text")
     })
@@ -883,7 +1003,7 @@ server <- function(input, output, session) {
             theme_minimal(base_size = 12) +
             theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
             labs(x = NULL, y = "TPM", fill = NULL)
-        ggplotly(apply_palette(p), tooltip = "text")
+        pl("plot_rna_tissue", apply_palette(p, gene_colors()), tooltip = "text")
     })
 
     output$plot_rna_tissue_hm <- renderPlotly({
@@ -900,7 +1020,7 @@ server <- function(input, output, session) {
             theme_minimal(base_size = 11) +
             theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
             labs(x = NULL, y = NULL)
-        ggplotly(apply_heatmap_palette(p), tooltip = "text")
+        pl("plot_rna_tissue_hm", apply_heatmap_palette(p), tooltip = "text")
     })
 
     output$plot_rna_tissue_hm_raw <- renderPlotly({
@@ -917,7 +1037,7 @@ server <- function(input, output, session) {
             theme_minimal(base_size = 11) +
             theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
             labs(x = NULL, y = NULL)
-        ggplotly(apply_heatmap_palette(p, name = "log10(TPM+1)",
+        pl("plot_rna_tissue_hm_raw", apply_heatmap_palette(p, name = "log10(TPM+1)",
                                        midpoint = mid_of(df$log10_tpm)),
                  tooltip = "text")
     })
@@ -993,7 +1113,14 @@ server <- function(input, output, session) {
             theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
             labs(x = NULL, y = "Z-score (within gene, within modality)",
                  color = "Gene — modality")
-        ggplotly(apply_palette(p), tooltip = "text")
+        # Combined plot colours by "gene - modality" series; map each series to
+        # its gene's chosen colour when custom colouring is on.
+        gc <- gene_colors(); manual <- NULL
+        if (!is.null(gc)) {
+            ser <- unique(as.character(df$series))
+            manual <- setNames(unname(gc[sub(" .*", "", ser)]), ser)
+        }
+        pl("plot_combined", apply_palette(p, manual), tooltip = "text")
     })
 
     output$plot_combined_hm <- renderPlotly({
@@ -1011,7 +1138,7 @@ server <- function(input, output, session) {
             theme_minimal(base_size = 11) +
             theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
             labs(x = NULL, y = NULL)
-        ggplotly(apply_heatmap_palette(p), tooltip = "text")
+        pl("plot_combined_hm", apply_heatmap_palette(p), tooltip = "text")
     })
 
     output$plot_combined_hm_raw <- renderPlotly({
@@ -1029,7 +1156,7 @@ server <- function(input, output, session) {
             theme_minimal(base_size = 11) +
             theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
             labs(x = NULL, y = NULL)
-        ggplotly(apply_heatmap_palette(p, name = "raw value",
+        pl("plot_combined_hm_raw", apply_heatmap_palette(p, name = "raw value",
                                        midpoint = mid_of(df$value)),
                  tooltip = "text")
     })

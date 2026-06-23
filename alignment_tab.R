@@ -42,7 +42,7 @@ TAYLOR <- c(A="#ccff00", R="#0000ff", N="#cc00ff", D="#ff0000", C="#ffff00",
 # so users pick from a menu instead of typing hex.
 COLOR_CHOICES <- c(
     "royalblue","steelblue","dodgerblue","skyblue","navy","blue",
-    "red","firebrick","crimson","salmon",
+    "red","firebrick","red3","salmon",
     "darkorange","orange","gold","yellow",
     "limegreen","green3","forestgreen","seagreen","olivedrab",
     "turquoise","cyan3",
@@ -156,6 +156,7 @@ alignment_tab_ui <- sidebarLayout(
             plotOutput("cons_plot", height = "200px",
                        brush = brushOpts(id = "cons_brush", direction = "x"),
                        dblclick = "cons_dblclick"),
+            downloadButton("dl_cons_plot", "Download figure", class = "btn-sm"),
             actionButton("clear_region", "Reset selection", class = "btn-warning btn-sm"),
             verbatimTextOutput("region_stats"),
             h5("Residue numbering across species (selected region)"),
@@ -176,11 +177,12 @@ alignment_tab_ui <- sidebarLayout(
             plotOutput("aln_plot", height = "auto",
                        brush = brushOpts(id = "aln_brush", direction = "x"),
                        click = clickOpts(id = "aln_click")),
+            downloadButton("dl_aln_plot", "Download figure", class = "btn-sm"),
             actionButton("clear_region_btm", "Reset selection", class = "btn-warning btn-sm")
         )
     )
 
-alignment_tab_server <- function(input, output, session) {
+alignment_tab_server <- function(input, output, session, figs = reactiveValues()) {
     updateSelectizeInput(session, "xl", choices = choices_for("X. laevis"),
                          selected = choices_for("X. laevis")[["krt8.L"]], server = TRUE)
     updateSelectizeInput(session, "hs", choices = choices_for("human"),
@@ -408,11 +410,14 @@ alignment_tab_server <- function(input, output, session) {
         if (!is.null(sel_region()))
             p <- p + annotate("rect", xmin = rg[1] - 0.5, xmax = rg[2] + 0.5,
                               ymin = 0, ymax = 1, fill = "#ffd54f", alpha = 0.4)
-        p + geom_col(width = 1, fill = "#2166AC") +
+        g <- p + geom_col(width = 1, fill = "#2166AC") +
             scale_y_continuous(limits = c(0, 1), labels = scales::percent) +
             scale_x_continuous(expand = c(0, 0)) +
             labs(x = "alignment position", y = "% conserved") +
             theme_minimal(base_size = 11)
+        figs[["cons_plot"]] <- g
+        figs[["__dim_cons_plot"]] <- c(w = 11, h = 2.6)   # wide, short track
+        g
     })
 
     output$region_stats <- renderText({
@@ -577,6 +582,11 @@ alignment_tab_server <- function(input, output, session) {
             p <- p + geom_rect(data = hb, inherit.aes = FALSE,
                                aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf),
                                fill = NA, colour = "#e65100", linewidth = 1.1)
+        figs[["aln_plot"]] <- p
+        # Export size matched to the on-screen wrapped layout (px height / 96 dpi)
+        # so the downloaded alignment isn't squished into the default 5 in.
+        figs[["__dim_aln_plot"]] <- c(w = 11,
+            h = max(3, nblocks * ((nseq + 2) * 20 + 80) / 96))
         p
     },
     height = function() {

@@ -2726,16 +2726,13 @@
       "checksum": "49f33761cecb525b69c80e9458caee53"
     },
     "alignment_tab.R": {
-      "checksum": "a3042e3d66db090fb8a5a3ec416c42c9"
+      "checksum": "6391a40da66c9d763b0b2c54810e0a73"
     },
     "all_phosphosites_perstage.tsv": {
       "checksum": "8d76c4c7cd6f8b94067d56925d173d9e"
     },
     "app.R": {
-      "checksum": "0a1bc74c1024fa40578b3d17f5c0f269"
-    },
-    "build_dev_data.py": {
-      "checksum": "b9e5a1aa580938aecf0db9adb32fdd43"
+      "checksum": "c146062178a41a65e32ee893815de650"
     },
     "build_full_data.py": {
       "checksum": "c151fb6684086717d5f38a0b8dc6ac98"
@@ -2748,6 +2745,9 @@
     },
     "README.md": {
       "checksum": "2b73cc909fbfe4febec5979615d77c86"
+    },
+    "Rplots.pdf": {
+      "checksum": "15359d5b995b59cdd5fc664d6cc9ba80"
     },
     "sequences.tsv": {
       "checksum": "6f368037fbde0e28f6cfecd21ebe3758"
